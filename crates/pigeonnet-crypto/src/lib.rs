@@ -18,9 +18,11 @@ pub mod identity;
 pub mod keys;
 pub mod keystore;
 pub mod sign;
+pub mod snapshot;
 
 pub use error::CryptoError;
 pub use identity::{IdentityError, IdentityState};
 pub use keys::{AgreementKeypair, SigningKeypair, verify};
 pub use keystore::Keyring;
 pub use sign::{sign_object, verify_object};
+pub use snapshot::{ResolvedIdentity, Snapshot, SnapshotError};
