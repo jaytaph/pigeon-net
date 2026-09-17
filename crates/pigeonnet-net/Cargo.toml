@@ -10,7 +10,12 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+pigeonnet-core.workspace = true
+pigeonnet-proto.workspace = true
 pigeonnet-node.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+getrandom.workspace = true
