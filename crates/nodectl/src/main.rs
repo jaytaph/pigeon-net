@@ -11,7 +11,7 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
-use pigeonnet_core::{ObjectId, payload::IdentityCreated, payload::Payload};
+use pigeonnet_core::{NodeId, ObjectId, payload::IdentityCreated, payload::Payload};
 use pigeonnet_node::Node;
 
 /// Pigeonnet node control.
@@ -35,6 +35,10 @@ enum Command {
     /// Object inspection.
     #[command(subcommand)]
     Object(ObjectCommand),
+
+    /// Offline transport: bundles on removable media (§19).
+    #[command(subcommand)]
+    Bundle(BundleCommand),
 }
 
 #[derive(Subcommand, Debug)]
@@ -47,6 +51,23 @@ enum IdentityCommand {
     },
     /// Show this node's identity and key state.
     Show,
+}
+
+#[derive(Subcommand, Debug)]
+enum BundleCommand {
+    /// Pack this node's objects into a file.
+    Export {
+        /// Where to write it.
+        path: PathBuf,
+        /// The peer this bundle is for, so it can carry our cursor back.
+        #[arg(long)]
+        peer: Option<String>,
+    },
+    /// Read a bundle. Safe to run on a file from anywhere.
+    Import {
+        /// The file to read.
+        path: PathBuf,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -69,6 +90,10 @@ fn main() -> Result<()> {
         }
         Command::Identity(IdentityCommand::Show) => show_identity(&node),
         Command::Object(ObjectCommand::Show { id }) => show_object(&node, &id),
+        Command::Bundle(BundleCommand::Export { path, peer }) => {
+            export_bundle(&node, &path, peer.as_deref())
+        }
+        Command::Bundle(BundleCommand::Import { path }) => import_bundle(&node, &path),
     }
 }
 
@@ -217,6 +242,40 @@ fn show_object(node: &Node, id: &str) -> Result<()> {
         println!("  root key      {}", payload.root_key);
         println!("  recovery key  {}", payload.recovery_key);
         println!("  agreement key {}", payload.agreement_key);
+    }
+    Ok(())
+}
+
+fn export_bundle(node: &Node, path: &std::path::Path, peer: Option<&str>) -> Result<()> {
+    let passphrase = passphrase()?;
+    let origin = node.node_id(&passphrase)?;
+    let peer = peer
+        .map(|text| NodeId::parse(text).map_err(|e| anyhow::anyhow!("{e}")))
+        .transpose()?;
+
+    let bytes = node.export_bundle(origin, now_millis()?, &[], peer)?;
+    std::fs::write(path, &bytes).with_context(|| format!("writing {}", path.display()))?;
+
+    println!("  objects   {}", node.store().len()?);
+    println!("  origin    {origin}");
+    println!("  size      {} bytes", bytes.len());
+    println!("  written to {}", path.display());
+    Ok(())
+}
+
+fn import_bundle(node: &Node, path: &std::path::Path) -> Result<()> {
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let (report, requests) = node.import_bundle(&bytes, now_millis()?)?;
+
+    println!("  {} objects accepted", report.accepted);
+    println!("  {} already held", report.already_held);
+    println!("  {} cursors advanced", report.cursors_advanced);
+    if !requests.is_empty() {
+        println!();
+        println!("  the sender is missing everything after:");
+        for request in requests {
+            println!("    {:?} after {}", request.stream, request.after);
+        }
     }
     Ok(())
 }

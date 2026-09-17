@@ -6,7 +6,10 @@
 //! Takes the current time as an argument rather than reading a clock, so that
 //! node behaviour is reproducible in a test.
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(
+    test,
+    allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)
+)]
 
 pub mod replication;
 
@@ -17,6 +20,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use pigeonnet_bundle::{Bundle, BundleError, ImportReport, StreamCursor};
+use pigeonnet_core::NodeId;
 use pigeonnet_core::{
     IdentityId, Object, ObjectId, ObjectType, Tbs, Timestamp,
     payload::{Capabilities, DeviceKeyGranted, IdentityCreated, Payload},
@@ -25,6 +30,7 @@ use pigeonnet_crypto::{
     AgreementKeypair, CryptoError, IdentityError, IdentityState, Keyring, SigningKeypair,
     sign_object,
 };
+use pigeonnet_proto::{Replica as _, StreamId};
 use pigeonnet_store::{ObjectStore, StoreError};
 use zeroize::Zeroizing;
 
@@ -46,6 +52,8 @@ pub enum NodeError {
     AlreadyInitialised,
     /// This node holds no identity yet.
     NotInitialised,
+    /// A bundle could not be read or written.
+    Bundle(BundleError),
 }
 
 macro_rules! from_error {
@@ -61,6 +69,7 @@ from_error! {
     CryptoError => Crypto,
     IdentityError => Identity,
     pigeonnet_core::Error => Object,
+    BundleError => Bundle,
 }
 
 impl core::fmt::Display for NodeError {
@@ -73,6 +82,7 @@ impl core::fmt::Display for NodeError {
             Self::Object(e) => write!(f, "{e}"),
             Self::AlreadyInitialised => f.write_str("this node already holds an identity"),
             Self::NotInitialised => f.write_str("no identity yet -- run `nodectl identity create`"),
+            Self::Bundle(e) => write!(f, "{e}"),
         }
     }
 }
@@ -266,6 +276,71 @@ impl Node {
         Ok(Keyring::open(&sealed, passphrase)?)
     }
 
+    /// This node's identifier on the network.
+    ///
+    /// Derived from the device key, which conflates *who* with *where* more than
+    /// §17 intends — a node and an identity are meant to be separable. Good
+    /// enough while there is one device per node; a dedicated node key belongs
+    /// with peer configuration.
+    pub fn node_id(&self, passphrase: &[u8]) -> Result<NodeId, NodeError> {
+        let keyring = self.keyring(passphrase)?;
+        Ok(NodeId::from_bytes(*keyring.device().public().as_bytes()))
+    }
+
+    /// Pack everything this node holds into a bundle (§19).
+    ///
+    /// `wanted` states what the recipient is missing. An empty slice means
+    /// everything, which is the right default for a first exchange and wasteful
+    /// for any later one — hence the `requests` a bundle carries back.
+    pub fn export_bundle(
+        &self,
+        origin: NodeId,
+        now: i64,
+        wanted: &[StreamCursor],
+        for_peer: Option<NodeId>,
+    ) -> Result<Vec<u8>, NodeError> {
+        let wanted = if wanted.is_empty() {
+            vec![StreamCursor {
+                stream: StreamId::All,
+                after: 0,
+            }]
+        } else {
+            wanted.to_vec()
+        };
+
+        // Tell the recipient where we stand, so their reply can be targeted
+        // rather than exhaustive.
+        let requests = match for_peer {
+            Some(peer) => {
+                let replication = self.replication(now);
+                vec![StreamCursor {
+                    stream: StreamId::All,
+                    after: replication
+                        .cursor(peer, &StreamId::All)
+                        .map_err(|e| NodeError::Bundle(BundleError::Local(e.0)))?,
+                }]
+            }
+            None => Vec::new(),
+        };
+
+        let replication = self.replication(now);
+        let bundle = Bundle::export(&replication, origin, now, &wanted, requests, &self.limits)?;
+        Ok(bundle.encode()?)
+    }
+
+    /// Validate and apply a bundle from untrusted media.
+    pub fn import_bundle(
+        &self,
+        bytes: &[u8],
+        now: i64,
+    ) -> Result<(ImportReport, Vec<StreamCursor>), NodeError> {
+        let bundle = Bundle::decode(bytes, &self.limits)?;
+        let requests = bundle.requests.clone();
+        let mut replication = self.replication(now);
+        let report = bundle.import(&mut replication)?;
+        Ok((report, requests))
+    }
+
     /// Fetch an object.
     pub fn object(&self, id: ObjectId) -> Result<Option<Object>, NodeError> {
         Ok(self.store.get(id)?)
@@ -388,6 +463,112 @@ mod tests {
         let node = Node::open(&dir.0).unwrap();
         node.create_identity(b"correct", NOW).unwrap();
         assert!(matches!(node.keyring(b"wrong"), Err(NodeError::Crypto(_))));
+    }
+
+    #[test]
+    fn a_bundle_carries_one_node_to_another() {
+        // The same convergence M2 achieved over TCP, with a file in place of a
+        // socket and nothing else in common between the two nodes.
+        let a_dir = Temp(temp_root());
+        let b_dir = Temp(temp_root());
+        let a = Node::open(&a_dir.0).unwrap();
+        let b = Node::open(&b_dir.0).unwrap();
+        a.create_identity(b"pa", NOW).unwrap();
+        b.create_identity(b"pb", NOW).unwrap();
+
+        let origin = a.node_id(b"pa").unwrap();
+        let bytes = a.export_bundle(origin, NOW, &[], None).unwrap();
+        let (report, _) = b.import_bundle(&bytes, NOW).unwrap();
+
+        assert_eq!(report.accepted, 2);
+        assert_eq!(b.store().len().unwrap(), 4);
+    }
+
+    #[test]
+    fn re_importing_a_bundle_changes_nothing() {
+        let a_dir = Temp(temp_root());
+        let b_dir = Temp(temp_root());
+        let a = Node::open(&a_dir.0).unwrap();
+        let b = Node::open(&b_dir.0).unwrap();
+        a.create_identity(b"pa", NOW).unwrap();
+        b.create_identity(b"pb", NOW).unwrap();
+
+        let origin = a.node_id(b"pa").unwrap();
+        let bytes = a.export_bundle(origin, NOW, &[], None).unwrap();
+        b.import_bundle(&bytes, NOW).unwrap();
+        let (again, _) = b.import_bundle(&bytes, NOW).unwrap();
+
+        assert_eq!(again.accepted, 0);
+        assert_eq!(again.already_held, 2);
+        assert_eq!(b.store().len().unwrap(), 4);
+    }
+
+    #[test]
+    fn a_bundle_carries_the_senders_cursor_back() {
+        // So the reply can be targeted rather than exhaustive (§19).
+        let a_dir = Temp(temp_root());
+        let b_dir = Temp(temp_root());
+        let a = Node::open(&a_dir.0).unwrap();
+        let b = Node::open(&b_dir.0).unwrap();
+        a.create_identity(b"pa", NOW).unwrap();
+        b.create_identity(b"pb", NOW).unwrap();
+
+        let a_id = a.node_id(b"pa").unwrap();
+        let b_id = b.node_id(b"pb").unwrap();
+
+        // First hop: A to B, telling B where A stands for B.
+        let bytes = a.export_bundle(a_id, NOW, &[], Some(b_id)).unwrap();
+        let (_, requests) = b.import_bundle(&bytes, NOW).unwrap();
+        assert_eq!(requests.len(), 1, "A stated its cursor");
+
+        // Second hop: B answers only what A asked for.
+        let reply = b.export_bundle(b_id, NOW, &requests, Some(a_id)).unwrap();
+        let (report, _) = a.import_bundle(&reply, NOW).unwrap();
+        assert_eq!(report.accepted, 2);
+        assert_eq!(a.store().len().unwrap(), 4);
+    }
+
+    #[test]
+    fn a_tampered_bundle_is_refused() {
+        let a_dir = Temp(temp_root());
+        let b_dir = Temp(temp_root());
+        let a = Node::open(&a_dir.0).unwrap();
+        let b = Node::open(&b_dir.0).unwrap();
+        a.create_identity(b"pa", NOW).unwrap();
+        b.create_identity(b"pb", NOW).unwrap();
+
+        let origin = a.node_id(b"pa").unwrap();
+        let bytes = a.export_bundle(origin, NOW, &[], None).unwrap();
+
+        // Alter an object's bytes specifically, rather than a byte at some
+        // arbitrary offset: the keys are random, so a positional flip lands on a
+        // different field every run and sometimes produces a bundle that is
+        // merely different rather than invalid.
+        let mut bundle = pigeonnet_bundle::Bundle::decode(&bytes, a.limits()).unwrap();
+        let victim = bundle.objects.first_mut().expect("bundle carries objects");
+        let last = victim.len() - 1;
+        victim[last] ^= 0x40;
+        let victim_bytes = victim.to_vec();
+        let tampered = bundle.encode().unwrap();
+
+        let error = b.import_bundle(&tampered, NOW).unwrap_err();
+        assert!(matches!(error, NodeError::Bundle(_)), "{error}");
+
+        // Import is deliberately not atomic: a valid object that travelled
+        // alongside a corrupt one is still valid, and rolling it back would let
+        // one bad entry deny a whole batch. What must hold is that the tampered
+        // object is not stored, and that no cursor moved.
+        let tampered_id = pigeonnet_core::Object::from_canonical_bytes(&victim_bytes)
+            .map(|o| o.id())
+            .ok();
+        if let Some(id) = tampered_id {
+            assert!(!b.store().contains(id).unwrap(), "stored a tampered object");
+        }
+        assert_eq!(
+            b.replication(NOW).cursor(origin, &StreamId::All).unwrap(),
+            0,
+            "a cursor moved on a bundle we refused"
+        );
     }
 
     #[test]
