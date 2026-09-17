@@ -59,6 +59,12 @@ enum Command {
         /// Address to listen on.
         #[arg(long, default_value = "0.0.0.0:4137")]
         listen: String,
+        /// Serve only; do not also pull from whoever connects.
+        ///
+        /// The reciprocal pull is how a peer behind a firewall gets its own
+        /// objects out. Turning it off makes this node a read-only source.
+        #[arg(long)]
+        serve_only: bool,
     },
 
     /// Post to an echo area.
@@ -68,6 +74,24 @@ enum Command {
         /// What to say.
         content: String,
     },
+
+    /// Send a private message (§8).
+    Message {
+        /// The recipient's identity. It must already be resolvable here.
+        identity: String,
+        /// What to say.
+        content: String,
+    },
+
+    /// Show private messages addressed to this node.
+    Inbox,
+
+    /// Destroy epoch secrets whose retention window has closed (§8.1).
+    ///
+    /// Irreversible. Meant for a schedule: a node that never runs this keeps
+    /// every secret it has held, and its forward secrecy is a claim rather than
+    /// a property.
+    Expire,
 
     /// Show what this node knows of an identity's current state (§5.6).
     Resolve {
@@ -230,7 +254,24 @@ fn main() -> Result<()> {
         }
         Command::Peer(PeerCommand::List) => list_peers(&node),
         Command::Sync { address } => run_sync(&node, address.as_deref()),
-        Command::Serve { listen } => run_serve(&node, &listen),
+        Command::Serve { listen, serve_only } => run_serve(&node, &listen, !serve_only),
+        Command::Message { identity, content } => {
+            let identity =
+                pigeonnet_core::IdentityId::parse(&identity).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let id = node.send_message(identity, &content, &passphrase()?, now_millis()?)?;
+            println!("created  {id}");
+            println!("queued   for the next sync");
+            Ok(())
+        }
+        Command::Inbox => show_inbox(&node),
+        Command::Expire => {
+            let destroyed = node.destroy_expired_prekeys(&passphrase()?, now_millis()?)?;
+            match destroyed {
+                0 => println!("nothing has expired yet"),
+                n => println!("destroyed {n} epoch secrets; messages sealed to them are gone"),
+            }
+            Ok(())
+        }
         Command::Resolve { identity } => show_resolved(&node, &identity),
         Command::Prekeys { lookahead } => {
             let published = node.publish_prekeys(&passphrase()?, now_millis()?, lookahead)?;
@@ -604,7 +645,12 @@ fn run_sync(node: &Node, only: Option<&str>) -> Result<()> {
                     node.store().peer_pin(&peer.address, proved)?;
                 }
                 node.store().peer_record_sync(&peer.address, now, None)?;
-                println!("{} objects", report.accepted);
+                let direction = if report.offered {
+                    "both ways"
+                } else {
+                    "pull only"
+                };
+                println!("{} objects, {direction}", report.accepted);
             }
             Err(error) => {
                 // Recorded rather than only printed: a peer that has been
@@ -618,7 +664,7 @@ fn run_sync(node: &Node, only: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn run_serve(node: &Node, listen: &str) -> Result<()> {
+fn run_serve(node: &Node, listen: &str, reciprocate: bool) -> Result<()> {
     let passphrase = passphrase()?;
     let local = node.node_id(&passphrase)?;
     let limits = *node.limits();
@@ -632,10 +678,56 @@ fn run_serve(node: &Node, listen: &str) -> Result<()> {
         println!("identity   {local}");
         println!("serving    public areas and identity snapshots to anyone;");
         println!("           inboxes only to their owner (\u{a7}15.4)");
-        pigeonnet_net::serve(node, local, &listener, limits, true, || {
+        if reciprocate {
+            println!("           and pulling from whoever connects, so peers behind");
+            println!("           a firewall can publish (--serve-only to stop)");
+        }
+        pigeonnet_net::serve(node, local, &listener, limits, reciprocate, || {
             now_millis().unwrap_or(0)
         })
-            .await
-            .context("serving")
+        .await
+        .context("serving")
     })
+}
+
+fn show_inbox(node: &Node) -> Result<()> {
+    let messages = node.inbox(&passphrase()?, now_millis()?)?;
+    if messages.is_empty() {
+        println!("inbox is empty");
+        return Ok(());
+    }
+    for message in messages {
+        let secrecy = match message.fs {
+            pigeonnet_core::ForwardSecrecy::Epoch => "forward-secret",
+            pigeonnet_core::ForwardSecrecy::None => "NOT forward-secret",
+        };
+        println!(
+            "{}  {}",
+            render::iso8601(message.timestamp.as_millis()),
+            message.id
+        );
+        println!("  from     {}", message.sender);
+        println!("  secrecy  {secrecy}");
+        match message.body {
+            pigeonnet_node::MessageBody::Opened(text) => {
+                println!();
+                for line in text.lines() {
+                    println!("  {line}");
+                }
+            }
+            pigeonnet_node::MessageBody::Expired => {
+                println!(
+                    "  (the epoch this was sealed to has been destroyed \u{2014} gone for good)"
+                );
+            }
+            pigeonnet_node::MessageBody::NotForThisDevice => {
+                println!("  (sealed to another of your devices)");
+            }
+            pigeonnet_node::MessageBody::Unreadable => {
+                println!("  (could not be opened)");
+            }
+        }
+        println!();
+    }
+    Ok(())
 }
