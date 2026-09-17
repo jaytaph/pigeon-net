@@ -6,7 +6,9 @@
 //! property to keep and an expensive one to reintroduce.
 
 use minicbor::{Decode, Encode, bytes::ByteVec};
-use pigeonnet_core::{AreaName, IdentityId, NodeId, ObjectId, cbor};
+use pigeonnet_core::{
+    AreaName, IdentityId, NodeId, ObjectId, PublicKeyBytes, SignatureBytes, cbor,
+};
 
 use crate::{ProtocolError, limits::Limits};
 
@@ -82,6 +84,65 @@ pub enum StreamId {
     /// display filter over everything.
     #[n(2)]
     Echo(#[n(0)] AreaName),
+
+    /// One identity's incoming private messages (§15.4).
+    ///
+    /// Restricted, and the only restricted stream in v1. An inbox open to every
+    /// peer would make any identity's complete correspondence graph — senders,
+    /// sizes, timing — globally fetchable from any carrier in the world, which
+    /// is a far larger disclosure than §8.2's concession that relays on the path
+    /// see metadata.
+    #[n(3)]
+    Inbox(#[n(0)] IdentityId),
+}
+
+/// Who may read a stream (§15.4, D15).
+///
+/// Access is a property of the **stream class**, never of the asker's identity.
+/// There is no account, no registration, and no acceptance step: a brand-new
+/// identity nobody has heard of may pull an area, read years of history and
+/// leave. The network has to be readable before anyone has a reason to join it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Access {
+    /// Anyone who connects, subject to the serving node's quotas.
+    Open,
+    /// Only the named identity, proving it.
+    Owner(IdentityId),
+}
+
+impl StreamId {
+    /// Who may read this stream.
+    #[must_use]
+    pub const fn access(&self) -> Access {
+        match self {
+            Self::All | Self::Identity(_) | Self::Echo(_) => Access::Open,
+            Self::Inbox(identity) => Access::Owner(*identity),
+        }
+    }
+}
+
+/// Domain separator for the inbox authentication transcript.
+const INBOX_AUTH_CONTEXT: &[u8] = b"pigeonnet inbox-auth v1\x00";
+
+/// What a client signs to prove it may read an inbox.
+///
+/// Binds the stream, the serving node's nonce, and the serving node itself, so a
+/// proof captured by one node cannot be replayed at another or against a
+/// different stream.
+///
+/// The leading ASCII context string is what keeps this out of reach of object
+/// signatures: an object's signed bytes are canonical CBOR, which never begins
+/// with this prefix, so a signature collected here can never be presented as an
+/// object the key authored — or the reverse.
+pub fn inbox_auth_transcript(stream: &StreamId, nonce: &[u8; 32], serving: NodeId) -> Vec<u8> {
+    let mut transcript = Vec::with_capacity(128);
+    transcript.extend_from_slice(INBOX_AUTH_CONTEXT);
+    transcript.extend_from_slice(serving.as_bytes());
+    transcript.extend_from_slice(nonce);
+    if let Ok(encoded) = cbor::to_canonical_vec(stream) {
+        transcript.extend_from_slice(&encoded);
+    }
+    transcript
 }
 
 /// One journal position and the object at it.
@@ -200,6 +261,62 @@ pub enum Message {
         objects: Vec<ObjectId>,
     },
 
+    /// "Do you hold this identity's current state?" (D12, §5.6)
+    ///
+    /// **One hop. A node answers from what it holds and never forwards this.**
+    /// Forwarding would build a DHT: every node would learn who is asking about
+    /// whom, and the query would be floodable. One hop keeps it a cache lookup
+    /// against peers already chosen.
+    #[n(9)]
+    Resolve {
+        /// The exact identity. There is no search and no enumeration.
+        #[n(0)]
+        identity: IdentityId,
+    },
+
+    /// The answer, or its absence.
+    ///
+    /// The snapshot is opaque here: this crate never parses it. Everything
+    /// inside is self-signed, so verification belongs to the receiver and a
+    /// relay has no business pre-digesting it.
+    #[n(10)]
+    Resolved {
+        /// Who was asked about.
+        #[n(0)]
+        identity: IdentityId,
+        /// The encoded snapshot, or absent if this node does not hold it.
+        #[n(1)]
+        snapshot: Option<ByteVec>,
+    },
+
+    /// "Prove you may read that stream first." (§15.4)
+    #[n(11)]
+    AuthRequired {
+        /// The stream in question.
+        #[n(0)]
+        stream: StreamId,
+        /// A challenge chosen by the serving node.
+        #[cbor(n(1), with = "minicbor::bytes")]
+        nonce: [u8; 32],
+    },
+
+    /// A device-key signature over the challenge.
+    #[n(12)]
+    AuthProof {
+        /// The stream being claimed.
+        #[n(0)]
+        stream: StreamId,
+        /// Who is claiming it.
+        #[n(1)]
+        identity: IdentityId,
+        /// Which of that identity's device keys signed.
+        #[n(2)]
+        signing_key: PublicKeyBytes,
+        /// The signature over [`inbox_auth_transcript`].
+        #[n(3)]
+        signature: SignatureBytes,
+    },
+
     /// Orderly end of session.
     #[n(8)]
     Bye,
@@ -218,6 +335,10 @@ impl Message {
             Self::Deliver { .. } => "Deliver",
             Self::InventoryRequest { .. } => "InventoryRequest",
             Self::InventoryResponse { .. } => "InventoryResponse",
+            Self::AuthRequired { .. } => "AuthRequired",
+            Self::AuthProof { .. } => "AuthProof",
+            Self::Resolve { .. } => "Resolve",
+            Self::Resolved { .. } => "Resolved",
             Self::Bye => "Bye",
         }
     }
@@ -291,7 +412,28 @@ impl Message {
                 }
                 Ok(())
             }
-            Self::Hello { .. } | Self::HelloAck { .. } | Self::Want { .. } | Self::Bye => Ok(()),
+            Self::Resolved { snapshot, .. } => {
+                // A snapshot is roughly 14 KB for a three-device identity
+                // (§5.6). The frame limit is the real bound; this guards against
+                // a peer padding one to exhaust memory before it is parsed.
+                match snapshot {
+                    Some(bytes) if bytes.len() > limits.max_snapshot_bytes => {
+                        Err(ProtocolError::TooMany {
+                            what: "snapshot bytes",
+                            count: bytes.len(),
+                            limit: limits.max_snapshot_bytes,
+                        })
+                    }
+                    _ => Ok(()),
+                }
+            }
+            Self::Hello { .. }
+            | Self::HelloAck { .. }
+            | Self::Want { .. }
+            | Self::Resolve { .. }
+            | Self::AuthRequired { .. }
+            | Self::AuthProof { .. }
+            | Self::Bye => Ok(()),
         }
     }
 }

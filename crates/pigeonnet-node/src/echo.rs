@@ -4,8 +4,7 @@ use pigeonnet_core::{
     AreaName, EchoPost, IdentityId, ObjectId, ObjectType, Tbs, Timestamp, cbor,
     payload::{Capabilities, Payload},
 };
-use pigeonnet_crypto::sign_object;
-use pigeonnet_proto::{Replica as _, StreamId};
+use pigeonnet_proto::StreamId;
 
 use crate::{Node, NodeError};
 
@@ -124,43 +123,13 @@ impl Node {
         passphrase: &[u8],
         now: i64,
     ) -> Result<ObjectId, NodeError> {
-        let identity = self.local_identity()?;
-        let keyring = self.keyring(passphrase)?;
-        let device = keyring.device();
-
-        // Check our own authority before writing, rather than discovering on the
-        // next read that we signed something we were not entitled to.
-        let state = self.identity_state(identity)?;
-        state.check_device_authority(
-            device.public(),
-            Timestamp::from_millis(now),
+        self.publish(
+            ObjectType::EchoPost,
+            payload.encode_payload()?,
             Capabilities::POST,
-        )?;
-
-        let sequence = self
-            .store()
-            .highest_sequence(identity, device.public())?
-            .map_or(0, |highest| highest.saturating_add(1));
-
-        let object = sign_object(
-            &Tbs {
-                version: pigeonnet_core::OBJECT_VERSION,
-                type_code: ObjectType::EchoPost.code(),
-                author: identity,
-                signing_key: device.public(),
-                timestamp: Timestamp::from_millis(now),
-                sequence,
-                payload: payload.encode_payload()?,
-            },
-            &device,
-        )?;
-
-        let bytes = object.to_canonical_bytes()?;
-        let mut replication = self.replication(now);
-        replication
-            .accept(&bytes)
-            .map_err(|_| NodeError::Object(pigeonnet_core::Error::NonCanonical))?;
-        Ok(object.id())
+            passphrase,
+            now,
+        )
     }
 
     /// Every post in an area, arranged into threads.

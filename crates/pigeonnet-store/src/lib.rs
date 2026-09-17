@@ -480,6 +480,39 @@ impl ObjectStore {
         Self::collect_objects(rows)
     }
 
+    /// Every object an identity authored of one type, newest last.
+    pub fn objects_by_author_and_type(
+        &self,
+        author: IdentityId,
+        type_code: u16,
+    ) -> Result<Vec<Object>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT tbs, signature FROM objects
+             WHERE author = ?1 AND type_code = ?2
+             ORDER BY timestamp, id",
+        )?;
+        let rows = statement.query_map(
+            params![author.as_bytes().as_slice(), i64::from(type_code)],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )?;
+        Self::collect_objects(rows)
+    }
+
+    /// Every object of one type, whoever wrote it, newest last.
+    ///
+    /// Used to find carriage acceptances, which are authored by the *carrier*
+    /// and so cannot be found by the carried identity. A dedicated index belongs
+    /// here once carriage is common; a scan is honest while it is not.
+    pub fn objects_of_type(&self, type_code: u16) -> Result<Vec<Object>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT tbs, signature FROM objects WHERE type_code = ?1 ORDER BY timestamp, id",
+        )?;
+        let rows = statement.query_map(params![i64::from(type_code)], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+        Self::collect_objects(rows)
+    }
+
     fn collect_objects<I>(rows: I) -> Result<Vec<Object>, StoreError>
     where
         I: Iterator<Item = rusqlite::Result<(Vec<u8>, Vec<u8>)>>,

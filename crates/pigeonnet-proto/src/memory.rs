@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use pigeonnet_core::{NodeId, Object, ObjectId};
+use pigeonnet_core::{IdentityId, NodeId, Object, ObjectId, PublicKeyBytes, SignatureBytes};
 
 use crate::{
     AcceptError, Replica, ReplicaError,
@@ -20,6 +20,8 @@ pub struct MemoryReplica {
     objects: BTreeMap<ObjectId, Vec<u8>>,
     journals: BTreeMap<StreamId, Vec<JournalEntry>>,
     cursors: BTreeMap<(NodeId, StreamId), u64>,
+    snapshots: BTreeMap<IdentityId, Vec<u8>>,
+    authorised: std::collections::BTreeSet<IdentityId>,
 }
 
 impl MemoryReplica {
@@ -47,6 +49,16 @@ impl MemoryReplica {
             });
         }
         Ok(id)
+    }
+
+    /// Pretend this node holds a snapshot, for tests that exercise resolve.
+    pub fn put_snapshot(&mut self, identity: IdentityId, encoded: Vec<u8>) {
+        self.snapshots.insert(identity, encoded);
+    }
+
+    /// Treat proofs from this identity as valid, for protocol tests.
+    pub fn authorise_inbox(&mut self, identity: IdentityId) {
+        self.authorised.insert(identity);
     }
 
     /// How many objects are held.
@@ -113,6 +125,27 @@ impl Replica for MemoryReplica {
 
     fn accept(&mut self, bytes: &[u8]) -> Result<ObjectId, AcceptError> {
         self.insert(StreamId::All, bytes.to_vec())
+    }
+
+    /// Always absent: assembling a snapshot needs an identity's key chain and
+    /// its current state, which is the node's job, not a byte store's.
+    fn snapshot(&self, _identity: IdentityId) -> Result<Option<Vec<u8>>, ReplicaError> {
+        Ok(self.snapshots.get(&_identity).cloned())
+    }
+
+    /// Accepts whatever `authorised_inbox` was told to accept.
+    ///
+    /// Deliberately not a real check: verifying one needs a key chain, which is
+    /// the node's job. Tests that care about the cryptography live in
+    /// `pigeonnet-crypto`; tests here care about the protocol around it.
+    fn verify_inbox_access(
+        &self,
+        identity: IdentityId,
+        _signing_key: PublicKeyBytes,
+        _transcript: &[u8],
+        _signature: SignatureBytes,
+    ) -> Result<bool, ReplicaError> {
+        Ok(self.authorised.contains(&identity))
     }
 
     fn cursor(&self, peer: NodeId, stream: &StreamId) -> Result<u64, ReplicaError> {

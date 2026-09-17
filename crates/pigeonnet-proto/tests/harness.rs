@@ -77,7 +77,7 @@ fn sync(
                 match output {
                     Output::Send(m) => to_responder.push(m),
                     Output::Accepted(_) => accepted += 1,
-                    Output::Complete => {}
+                    Output::Resolved(_, _) | Output::Complete => {}
                 }
             }
         } else {
@@ -90,7 +90,7 @@ fn sync(
 fn pair(limits: Limits) -> (Session, Session) {
     (
         Session::initiator(ALICE, vec![StreamId::All], limits),
-        Session::responder(BOB, limits),
+        Session::responder(BOB, limits, [0x11; 32]),
     )
 }
 

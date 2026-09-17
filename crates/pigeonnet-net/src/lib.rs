@@ -121,7 +121,30 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     R: Replica,
 {
-    let mut accepted = 0;
+    Ok(drive(framed, session, replica, initial).await?.accepted)
+}
+
+/// What a completed session produced.
+#[derive(Debug, Default)]
+pub struct SessionOutcome {
+    /// Objects validated and stored.
+    pub accepted: usize,
+    /// An identity snapshot, if this was a resolve. Unverified bytes.
+    pub snapshot: Option<Vec<u8>>,
+}
+
+/// Drive a session to completion, returning everything it produced.
+pub async fn drive<S, R>(
+    framed: &mut Framed<S>,
+    session: &mut Session,
+    replica: &mut R,
+    initial: Input,
+) -> Result<SessionOutcome, NetError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    R: Replica,
+{
+    let mut outcome = SessionOutcome::default();
     let mut outputs = session.step(replica, initial)?;
 
     loop {
@@ -129,12 +152,13 @@ where
         for output in outputs {
             match output {
                 Output::Send(message) => framed.write_frame(&message).await?,
-                Output::Accepted(_) => accepted += 1,
+                Output::Accepted(_) => outcome.accepted += 1,
+                Output::Resolved(_, snapshot) => outcome.snapshot = snapshot,
                 Output::Complete => finished = true,
             }
         }
         if finished {
-            return Ok(accepted);
+            return Ok(outcome);
         }
         let message = framed.read_frame().await?;
         outputs = session.step(replica, Input::Received(message))?;
@@ -164,6 +188,8 @@ where
             match output {
                 Output::Send(message) => framed.write_frame(&message).await?,
                 Output::Accepted(_) => accepted += 1,
+                // A responder never asks, so it never receives an answer.
+                Output::Resolved(_, _) => {}
                 Output::Complete => return Ok(accepted),
             }
         }

@@ -38,6 +38,8 @@ pub struct Limits {
     pub max_bundle_bytes: usize,
     /// Most objects a single bundle may carry.
     pub max_bundle_objects: usize,
+    /// Largest identity snapshot this node will accept (D12).
+    pub max_snapshot_bytes: usize,
 }
 
 impl Limits {
@@ -54,6 +56,7 @@ impl Limits {
         max_streams: 64,
         max_bundle_bytes: 256 << 20,
         max_bundle_objects: 100_000,
+        max_snapshot_bytes: 1 << 20,
     };
 
     /// Tight limits, for tests and for nodes with very little to spare.
@@ -69,6 +72,7 @@ impl Limits {
         max_streams: 4,
         max_bundle_bytes: 1 << 20,
         max_bundle_objects: 64,
+        max_snapshot_bytes: 32 << 10,
     };
 }
 

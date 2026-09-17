@@ -47,7 +47,7 @@ fn area() -> AreaName {
 fn pull(into: &Node, into_id: NodeId, from: &Node, from_id: NodeId) -> usize {
     let limits = Limits::DEFAULT;
     let mut puller = Session::initiator(into_id, into.sync_plan().unwrap(), limits);
-    let mut server = Session::responder(from_id, limits);
+    let mut server = Session::responder(from_id, limits, [0x44; 32]);
     let mut here = into.replication(NOW);
     let mut there = from.replication(NOW);
 
@@ -67,6 +67,7 @@ fn pull(into: &Node, into_id: NodeId, from: &Node, from_id: NodeId) -> usize {
                     }
                 }
                 Output::Accepted(_) => accepted += 1,
+                Output::Resolved(_, _) => {}
                 Output::Complete => finished = true,
             }
         }

@@ -100,6 +100,21 @@ pub enum ProtocolError {
         limit: u64,
     },
 
+    /// A restricted stream was requested without an acceptable proof (§15.4).
+    ///
+    /// Carries no detail. Which of "no credential", "wrong identity" or "bad
+    /// signature" applied is information an asker can use and a legitimate one
+    /// does not need.
+    ///
+    /// Note where this is raised. A client raises it *locally*, before sending
+    /// anything, when it can see it cannot answer a challenge. A server raises
+    /// it when a proof fails, and then simply stops talking — so the client sees
+    /// a disconnect, not a reason. That asymmetry is deliberate: a server that
+    /// distinguished "denied" from "gone" would confirm to a prober that an
+    /// inbox exists and is guarded, and the legitimate owner never needs the
+    /// distinction, because it knows what credential it offered.
+    AccessDenied,
+
     /// The local store failed. Not the peer's fault, but the session ends.
     Local(String),
 }
@@ -138,6 +153,7 @@ impl fmt::Display for ProtocolError {
             Self::InventorySpanTooWide { span, limit } => {
                 write!(f, "inventory span {span} exceeds limit of {limit}")
             }
+            Self::AccessDenied => f.write_str("not permitted to read that stream"),
             Self::Local(message) => write!(f, "local failure: {message}"),
         }
     }

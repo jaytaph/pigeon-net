@@ -3,7 +3,10 @@
 //! The clock is injected rather than read, so a session's behaviour is
 //! reproducible in a test.
 
-use pigeonnet_core::{NodeId, Object, ObjectId, ObjectType, cbor, payload::Payload as _};
+use pigeonnet_core::{
+    IdentityId, NodeId, Object, ObjectId, ObjectType, PublicKeyBytes, SignatureBytes, cbor,
+    payload::Payload as _,
+};
 use pigeonnet_proto::{AcceptError, JournalEntry, Replica, ReplicaError, StreamId};
 
 use crate::Node;
@@ -99,6 +102,43 @@ impl Replica for Replication<'_> {
             .map_err(|e| AcceptError::Local(local(e)))?;
         self.journal(&object, id).map_err(AcceptError::Local)?;
         Ok(id)
+    }
+
+    fn snapshot(&self, identity: IdentityId) -> Result<Option<Vec<u8>>, ReplicaError> {
+        let snapshot = self.node.snapshot(identity, self.now).map_err(local)?;
+        snapshot
+            .map(|s| cbor::to_canonical_vec(&s).map_err(local))
+            .transpose()
+    }
+
+    /// Check an inbox proof: the signature, then the authority behind it.
+    ///
+    /// Both halves matter. A valid signature from a key the identity never
+    /// delegated is not authorisation, and a delegated key that has since been
+    /// revoked is not either.
+    fn verify_inbox_access(
+        &self,
+        identity: IdentityId,
+        signing_key: PublicKeyBytes,
+        transcript: &[u8],
+        signature: SignatureBytes,
+    ) -> Result<bool, ReplicaError> {
+        if pigeonnet_crypto::verify(signing_key, transcript, signature).is_err() {
+            return Ok(false);
+        }
+        // Needs the identity's key chain. A carrier holds it as an obligation of
+        // carriage (§5.7); anyone else may simply not know this identity, which
+        // is a refusal rather than a failure.
+        let Ok(state) = self.node.identity_state(identity) else {
+            return Ok(false);
+        };
+        Ok(state
+            .check_device_authority(
+                signing_key,
+                pigeonnet_core::Timestamp::from_millis(self.now),
+                pigeonnet_core::payload::Capabilities::NONE,
+            )
+            .is_ok())
     }
 
     fn cursor(&self, peer: NodeId, stream: &StreamId) -> Result<u64, ReplicaError> {

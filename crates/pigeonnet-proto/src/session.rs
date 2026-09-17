@@ -19,13 +19,15 @@
 
 use std::collections::{BTreeSet, VecDeque};
 
-use pigeonnet_core::{NodeId, Object, ObjectId};
+use pigeonnet_core::{IdentityId, NodeId, Object, ObjectId};
 
 use crate::{
     ProtocolError,
     limits::Limits,
-    message::{Features, JournalEntry, Message, PROTOCOL_VERSION, StreamId},
-    replica::{AcceptError, Replica},
+    message::{
+        Access, Features, JournalEntry, Message, PROTOCOL_VERSION, StreamId, inbox_auth_transcript,
+    },
+    replica::{AcceptError, InboxSigner, Replica},
 };
 
 /// Which side of a session this is.
@@ -53,6 +55,11 @@ pub enum Output {
     Send(Message),
     /// An object was validated and stored.
     Accepted(ObjectId),
+    /// A resolve answered. `None` means the peer does not hold that identity.
+    ///
+    /// The bytes are unverified: a snapshot is self-signed throughout, so the
+    /// caller verifies it and this layer does not pretend to.
+    Resolved(IdentityId, Option<Vec<u8>>),
     /// The session finished cleanly.
     Complete,
 }
@@ -64,6 +71,7 @@ enum State {
     AwaitingHelloAck,
     AwaitingHave,
     AwaitingDeliver,
+    AwaitingResolved,
     Serving,
     Done,
     Failed,
@@ -77,6 +85,7 @@ impl State {
             Self::AwaitingHelloAck => "awaiting HelloAck",
             Self::AwaitingHave => "awaiting Have",
             Self::AwaitingDeliver => "awaiting Deliver",
+            Self::AwaitingResolved => "awaiting Resolved",
             Self::Serving => "serving",
             Self::Done => "finished",
             Self::Failed => "failed",
@@ -97,7 +106,6 @@ struct StreamProgress {
 }
 
 /// One replication session with one peer.
-#[derive(Debug)]
 pub struct Session {
     role: Role,
     local: NodeId,
@@ -108,8 +116,29 @@ pub struct Session {
     queue: VecDeque<StreamId>,
     progress: Option<StreamProgress>,
     pending: BTreeSet<ObjectId>,
+    resolving: Option<IdentityId>,
+    /// Responder: challenge for this session, injected so that this crate needs
+    /// no randomness of its own.
+    nonce: [u8; 32],
+    /// Responder: identities that have proved themselves on this connection.
+    authenticated: BTreeSet<IdentityId>,
+    /// Responder: the request parked while a challenge is outstanding.
+    challenged: Option<(StreamId, u64, u32)>,
+    /// Initiator: how to answer a challenge, if it can.
+    signer: Option<Box<dyn InboxSigner>>,
     objects_accepted: usize,
     bytes_accepted: usize,
+}
+
+impl core::fmt::Debug for Session {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Session")
+            .field("role", &self.role)
+            .field("state", &self.state)
+            .field("peer", &self.peer)
+            .field("authenticated", &self.authenticated.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Session {
@@ -125,13 +154,60 @@ impl Session {
             queue: streams.into_iter().take(limits.max_streams).collect(),
             progress: None,
             pending: BTreeSet::new(),
+            resolving: None,
+            nonce: [0u8; 32],
+            authenticated: BTreeSet::new(),
+            challenged: None,
+            signer: None,
+            objects_accepted: 0,
+            bytes_accepted: 0,
+        }
+    }
+
+    /// Supply a credential for reading an inbox (§15.4).
+    ///
+    /// Without one, a session asking for a restricted stream fails the challenge
+    /// rather than silently receiving nothing.
+    #[must_use]
+    pub fn with_inbox_signer(mut self, signer: Box<dyn InboxSigner>) -> Self {
+        self.signer = Some(signer);
+        self
+    }
+
+    /// A session whose only job is to resolve one identity (D12).
+    ///
+    /// Separate from a sync because a snapshot fetch has no cursor, no ordering
+    /// and no session state to carry — forcing it into the journal model is what
+    /// made it not fit anywhere for so long.
+    pub fn resolver(local: NodeId, identity: IdentityId, limits: Limits) -> Self {
+        Self {
+            role: Role::Initiator,
+            local,
+            peer: None,
+            limits,
+            features: Features::NONE,
+            state: State::New,
+            queue: VecDeque::new(),
+            progress: None,
+            pending: BTreeSet::new(),
+            resolving: Some(identity),
+            nonce: [0u8; 32],
+            authenticated: BTreeSet::new(),
+            challenged: None,
+            signer: None,
             objects_accepted: 0,
             bytes_accepted: 0,
         }
     }
 
     /// A session that answers.
-    pub fn responder(local: NodeId, limits: Limits) -> Self {
+    ///
+    /// The `nonce` is the challenge this connection will issue for restricted
+    /// streams. It is injected rather than generated so that this crate draws no
+    /// randomness — which is what keeps it reproducible in a test and fuzzable.
+    /// It must be unpredictable and must not be reused across connections, or a
+    /// captured proof becomes a replayable one.
+    pub fn responder(local: NodeId, limits: Limits, nonce: [u8; 32]) -> Self {
         Self {
             role: Role::Responder,
             local,
@@ -142,6 +218,11 @@ impl Session {
             queue: VecDeque::new(),
             progress: None,
             pending: BTreeSet::new(),
+            resolving: None,
+            nonce,
+            authenticated: BTreeSet::new(),
+            challenged: None,
+            signer: None,
             objects_accepted: 0,
             bytes_accepted: 0,
         }
@@ -251,7 +332,29 @@ impl Session {
                 Self::check_version(version)?;
                 self.peer = Some(node);
                 self.features = Features::SUPPORTED.intersect(features);
+                if let Some(identity) = self.resolving {
+                    self.state = State::AwaitingResolved;
+                    return Ok(vec![Output::Send(Message::Resolve { identity })]);
+                }
                 self.begin_next_stream(replica)
+            }
+
+            (
+                State::AwaitingResolved,
+                Input::Received(Message::Resolved { identity, snapshot }),
+            ) => {
+                if Some(identity) != self.resolving {
+                    return Err(ProtocolError::Unexpected {
+                        message: "Resolved",
+                        state: "a session that asked about a different identity",
+                    });
+                }
+                self.state = State::Done;
+                Ok(vec![
+                    Output::Resolved(identity, snapshot.map(Into::into)),
+                    Output::Send(Message::Bye),
+                    Output::Complete,
+                ])
             }
 
             (
@@ -262,6 +365,32 @@ impl Session {
                     more,
                 }),
             ) => self.on_have(replica, &stream, &entries, more),
+
+            (State::AwaitingHave, Input::Received(Message::AuthRequired { stream, nonce })) => {
+                let Access::Owner(identity) = stream.access() else {
+                    return Err(ProtocolError::Unexpected {
+                        message: "AuthRequired",
+                        state: "a session asking for an open stream",
+                    });
+                };
+                let Some(signer) = self.signer.as_ref() else {
+                    return Err(ProtocolError::AccessDenied);
+                };
+                if signer.identity() != identity {
+                    return Err(ProtocolError::AccessDenied);
+                }
+                let peer = self.peer.ok_or(ProtocolError::Unexpected {
+                    message: "AuthRequired",
+                    state: "a session with no handshake",
+                })?;
+                let transcript = inbox_auth_transcript(&stream, &nonce, peer);
+                Ok(vec![Output::Send(Message::AuthProof {
+                    stream,
+                    identity,
+                    signing_key: signer.signing_key(),
+                    signature: signer.sign(&transcript),
+                })])
+            }
 
             (State::AwaitingDeliver, Input::Received(Message::Deliver { objects })) => {
                 self.on_deliver(replica, objects)
@@ -276,6 +405,16 @@ impl Session {
                     limit,
                 }),
             ) => {
+                // Access is a property of the stream, never of who is asking.
+                if let Access::Owner(identity) = stream.access()
+                    && !self.authenticated.contains(&identity)
+                {
+                    self.challenged = Some((stream.clone(), after, limit));
+                    return Ok(vec![Output::Send(Message::AuthRequired {
+                        stream,
+                        nonce: self.nonce,
+                    })]);
+                }
                 let limit = (limit as usize).min(self.limits.max_have_entries);
                 let (entries, more) = replica
                     .journal_after(&stream, after, limit)
@@ -313,6 +452,63 @@ impl Session {
                 Ok(vec![Output::Send(Message::InventoryResponse {
                     stream,
                     objects,
+                })])
+            }
+
+            (
+                State::Serving,
+                Input::Received(Message::AuthProof {
+                    stream,
+                    identity,
+                    signing_key,
+                    signature,
+                }),
+            ) => {
+                let Some((wanted, after, limit)) = self.challenged.take() else {
+                    return Err(ProtocolError::Unexpected {
+                        message: "AuthProof",
+                        state: "a session that issued no challenge",
+                    });
+                };
+                if wanted != stream || stream.access() != Access::Owner(identity) {
+                    return Err(ProtocolError::Unexpected {
+                        message: "AuthProof",
+                        state: "a session that challenged a different stream",
+                    });
+                }
+
+                let transcript = inbox_auth_transcript(&stream, &self.nonce, self.local);
+                let ok = replica
+                    .verify_inbox_access(identity, signing_key, &transcript, signature)
+                    .map_err(|e| ProtocolError::Local(e.0))?;
+                if !ok {
+                    return Err(ProtocolError::AccessDenied);
+                }
+                self.authenticated.insert(identity);
+
+                // Answer the request that was parked, rather than making the
+                // peer ask again.
+                let limit = (limit as usize).min(self.limits.max_have_entries);
+                let (entries, more) = replica
+                    .journal_after(&stream, after, limit)
+                    .map_err(|e| ProtocolError::Local(e.0))?;
+                Ok(vec![Output::Send(Message::Have {
+                    stream,
+                    entries,
+                    more,
+                })])
+            }
+
+            (State::Serving, Input::Received(Message::Resolve { identity })) => {
+                // Answered from what this node holds, and never by asking
+                // anyone else. Forwarding would make every node a party to who
+                // is asking about whom, and would make the query floodable.
+                let snapshot = replica
+                    .snapshot(identity)
+                    .map_err(|e| ProtocolError::Local(e.0))?;
+                Ok(vec![Output::Send(Message::Resolved {
+                    identity,
+                    snapshot: snapshot.map(Into::into),
                 })])
             }
 

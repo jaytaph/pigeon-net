@@ -12,9 +12,12 @@
 )]
 
 pub mod echo;
+pub mod inbox;
 pub mod replication;
+pub mod snapshot;
 
 pub use echo::ThreadedPost;
+pub use inbox::DeviceCredential;
 pub use replication::Replication;
 
 use std::{
@@ -346,6 +349,52 @@ impl Node {
         let mut replication = self.replication(now);
         let report = bundle.import(&mut replication)?;
         Ok((report, requests))
+    }
+
+    /// Sign an object as this node's identity and store it.
+    ///
+    /// Authority is checked against our own key chain *before* writing, rather
+    /// than discovering on the next read that we signed something we were not
+    /// entitled to.
+    pub fn publish(
+        &self,
+        object_type: ObjectType,
+        payload: Vec<u8>,
+        required: Capabilities,
+        passphrase: &[u8],
+        now: i64,
+    ) -> Result<ObjectId, NodeError> {
+        let identity = self.local_identity()?;
+        let keyring = self.keyring(passphrase)?;
+        let device = keyring.device();
+
+        let state = self.identity_state(identity)?;
+        state.check_device_authority(device.public(), Timestamp::from_millis(now), required)?;
+
+        let sequence = self
+            .store
+            .highest_sequence(identity, device.public())?
+            .map_or(0, |highest| highest.saturating_add(1));
+
+        let object = sign_object(
+            &Tbs {
+                version: pigeonnet_core::OBJECT_VERSION,
+                type_code: object_type.code(),
+                author: identity,
+                signing_key: device.public(),
+                timestamp: Timestamp::from_millis(now),
+                sequence,
+                payload,
+            },
+            &device,
+        )?;
+
+        let bytes = object.to_canonical_bytes()?;
+        let mut replication = self.replication(now);
+        replication
+            .accept(&bytes)
+            .map_err(|_| NodeError::Object(pigeonnet_core::Error::NonCanonical))?;
+        Ok(object.id())
     }
 
     /// Fetch an object.

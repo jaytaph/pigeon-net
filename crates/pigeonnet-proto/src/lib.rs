@@ -16,6 +16,8 @@ pub mod session;
 pub use error::ProtocolError;
 pub use limits::Limits;
 pub use memory::MemoryReplica;
-pub use message::{Features, JournalEntry, Message, PROTOCOL_VERSION, StreamId};
-pub use replica::{AcceptError, Replica, ReplicaError};
+pub use message::{
+    Access, Features, JournalEntry, Message, PROTOCOL_VERSION, StreamId, inbox_auth_transcript,
+};
+pub use replica::{AcceptError, InboxSigner, Replica, ReplicaError};
 pub use session::{Input, Output, Role, Session};
