@@ -345,6 +345,21 @@ simply stops talking. A server distinguishing "denied" from "gone" would confirm
 to a prober that an inbox exists and is guarded, and a legitimate owner never
 needs the distinction.
 
+**Peering added 2026-09-17, outside the plan.** `nodectl peer add`, `sync` and
+`serve` — §27 listed all three and no milestone had claimed them, because M2's
+exit criterion was convergence and its tests drove sessions directly. The
+transport worked; nothing could reach it. Two nodes on two machines now hold a
+threaded conversation over TCP.
+
+A peer's identity **pins on first sync** and is enforced at the handshake
+(`ProtocolError::WrongPeer`), so a changed address fails rather than continuing
+with whoever answered — the same trust-on-first-use shape as §5.2's naming, and
+what D14 means by "a wrong address yields a failed handshake rather than a hostile
+peer". `serve` handles one connection at a time on purpose: a node holds a SQLite
+connection, which is not `Sync`, and §15.4 is explicit that a node is never
+obliged to answer. Concurrency there would be a change of posture, not an
+optimisation.
+
 **Still open:** `NodeProfile` (D14), flagged from the start as the first thing to
 cut, and never needed by M6.
 

@@ -6,13 +6,51 @@ ideas, modern cryptography, untrusted relays, offline-first.
 > There are no mailboxes. There are identities, immutable objects,
 > subscriptions, peers, and replication.
 
-**Status: M4 complete.** Identities, canonical objects, replication over TCP,
-offline bundles, and public echo areas with threading. Private messaging is next,
-behind the reachability work of M5.
+**Status: M5 complete, and usable between two machines.** Identities, canonical
+objects, replication over TCP, offline bundles, public echo areas with threading,
+and identity resolution. Private messaging is next.
 
 Nobody should create an identity they care about yet: recovery lands in M8, and
 until then a lost or stolen root key ends the identity. See the gate in the
 milestone map.
+
+## Two nodes, one conversation
+
+On the machine that stays up:
+
+```bash
+export PIGEONNET_PASSPHRASE='...'          # no prompt yet
+nodectl identity create
+nodectl echo subscribe GOSUB.DEV
+nodectl post GOSUB.DEV "The hub is up. Anyone home?"
+nodectl serve --listen 0.0.0.0:4137
+```
+
+On the other:
+
+```bash
+export PIGEONNET_PASSPHRASE='...'
+nodectl identity create
+nodectl echo subscribe GOSUB.DEV
+nodectl peer add hub.example.net                # port defaults to 4137
+nodectl sync
+nodectl echo read GOSUB.DEV
+```
+
+A peer's identity **pins on first sync**, like an SSH host key. If something else
+later answers that address, the sync fails and says so rather than continuing with
+a stranger. `nodectl peer list` shows what is pinned and why the last attempt
+failed.
+
+With no network at all, the same exchange works by file:
+
+```bash
+nodectl bundle export /media/usb/out.pack     # on one node
+nodectl bundle import /media/usb/out.pack     # on the other
+```
+
+A node serves public areas and identity snapshots to anyone who connects, and an
+inbox only to its owner. It is never obliged to answer: quotas are local policy.
 
 ## Documents
 

@@ -602,6 +602,7 @@ dependencies = [
  "pigeonnet-core",
  "pigeonnet-net",
  "pigeonnet-node",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]
