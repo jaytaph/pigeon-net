@@ -26,7 +26,9 @@ pub use area::AreaName;
 pub use bytes::{AgreementKeyBytes, IdentityId, NodeId, ObjectId, PublicKeyBytes, SignatureBytes};
 pub use error::Error;
 pub use object::{Object, ObjectType, Tbs};
-pub use payload::EchoPost;
+pub use payload::{
+    CarriageAccepted, Carrier, EchoPost, EpochPrekey, IdentityProfile, ReachabilityClaim,
+};
 pub use time::Timestamp;
 
 /// Object format version carried by every object (§31).

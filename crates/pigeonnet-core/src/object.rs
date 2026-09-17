@@ -40,6 +40,14 @@ pub enum ObjectType {
     DeviceKeyRevoked = 3,
     /// A public post in an echo area (§6).
     EchoPost = 4,
+    /// Optional human-facing detail about an identity (§5.6).
+    IdentityProfile = 5,
+    /// One device's key-agreement key for one epoch (§8.1).
+    EpochPrekey = 6,
+    /// An identity naming the carriers it can be reached through (§5.7).
+    ReachabilityClaim = 7,
+    /// A carrier consenting to spool for an identity (§5.7).
+    CarriageAccepted = 8,
 }
 
 impl ObjectType {
@@ -56,6 +64,10 @@ impl ObjectType {
             2 => Ok(Self::DeviceKeyGranted),
             3 => Ok(Self::DeviceKeyRevoked),
             4 => Ok(Self::EchoPost),
+            5 => Ok(Self::IdentityProfile),
+            6 => Ok(Self::EpochPrekey),
+            7 => Ok(Self::ReachabilityClaim),
+            8 => Ok(Self::CarriageAccepted),
             other => Err(Error::UnknownObjectType(other)),
         }
     }
@@ -121,6 +133,15 @@ impl Tbs {
     #[must_use]
     pub fn is_genesis(&self) -> bool {
         self.author == IdentityId::ZERO
+    }
+
+    /// Try to read bytes as a to-be-signed structure.
+    ///
+    /// Exists so that other layers can assert bytes are *not* one — signing
+    /// transcripts must be unmistakable for objects, or a signature gathered in
+    /// one context could be replayed in the other.
+    pub fn try_from_canonical(bytes: &[u8]) -> Result<Self, Error> {
+        cbor::from_canonical_slice(bytes)
     }
 
     /// Canonical bytes: what gets signed, and what the identifier is taken over.

@@ -9,7 +9,7 @@ use minicbor::{Decode, Encode};
 use crate::{
     Error, ObjectType,
     area::AreaName,
-    bytes::{AgreementKeyBytes, ObjectId, PublicKeyBytes},
+    bytes::{AgreementKeyBytes, IdentityId, NodeId, ObjectId, PublicKeyBytes},
     cbor,
     time::Timestamp,
 };
@@ -397,4 +397,115 @@ mod tests {
         let bytes = created.encode_payload().unwrap();
         assert_eq!(IdentityCreated::decode_payload(&bytes).unwrap(), created);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Current state (§5.6). Latest-wins, aggressively pruned, never journalled.
+// ---------------------------------------------------------------------------
+
+/// Optional human-facing detail about an identity (§5.6).
+///
+/// Carries no authority. A display name here is what its owner chose to call
+/// itself, not a name anyone else has agreed to (§5.2 is where names bind).
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+#[cbor(map)]
+pub struct IdentityProfile {
+    /// What the identity calls itself.
+    #[n(0)]
+    pub display_name: Option<String>,
+}
+
+impl Payload for IdentityProfile {
+    const OBJECT_TYPE: ObjectType = ObjectType::IdentityProfile;
+}
+
+/// One device's key-agreement key for one epoch (§8.1, D4).
+///
+/// The identity and the device are **not** repeated here: they are the
+/// envelope's `author` and `signing_key`. Carrying them twice would create two
+/// places that can disagree, and a validation rule to reconcile them, for no
+/// gain.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+#[cbor(map)]
+pub struct EpochPrekey {
+    /// Which epoch this covers.
+    #[n(0)]
+    pub epoch: u64,
+
+    /// The public half.
+    #[n(1)]
+    pub public_key: AgreementKeyBytes,
+
+    /// When the private half is destroyed (`epoch_end + W`).
+    ///
+    /// Published so a sender can see how much of the delivery budget is left
+    /// before committing to this key, rather than guessing at the recipient's
+    /// retention window.
+    #[n(2)]
+    pub valid_until: Timestamp,
+}
+
+impl Payload for EpochPrekey {
+    const OBJECT_TYPE: ObjectType = ObjectType::EpochPrekey;
+}
+
+/// One carrier, and what it costs to reach the identity through it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+#[cbor(map)]
+pub struct Carrier {
+    /// The carrying node.
+    #[n(0)]
+    pub node: NodeId,
+    /// Lower is preferred. Ranking only; carries no units.
+    #[n(1)]
+    pub cost: u32,
+}
+
+/// An identity naming the carriers it can be reached through (§5.7).
+///
+/// This is **not** a `RouteAdvertisement` and must not be treated as one. A
+/// route advertisement is a peer's claim about a third party, which is
+/// forgeable and therefore restricted to one hop (D6). This is an identity's
+/// claim about itself: the worst it can do is direct its own mail at a node that
+/// drops it, so it replicates freely.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+#[cbor(map)]
+pub struct ReachabilityClaim {
+    /// Carriers, in the author's order of preference.
+    #[n(0)]
+    pub via: Vec<Carrier>,
+
+    /// When this claim stops being actionable.
+    #[n(1)]
+    pub expires_at: Timestamp,
+}
+
+impl Payload for ReachabilityClaim {
+    const OBJECT_TYPE: ObjectType = ObjectType::ReachabilityClaim;
+}
+
+/// A carrier consenting to spool for an identity (§5.7).
+///
+/// Required alongside a [`ReachabilityClaim`] before any sender routes toward
+/// the named carrier. Without it, any identity could name any node and aim the
+/// network at it — reflection with an attacker-chosen target — and declining the
+/// traffic at the victim is no defence, because it already arrived.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+#[cbor(map)]
+pub struct CarriageAccepted {
+    /// The consenting node. Must match the signing device key.
+    #[n(0)]
+    pub carrier: NodeId,
+
+    /// Who is being carried.
+    #[n(1)]
+    pub identity: IdentityId,
+
+    /// When consent lapses. Carriage is revoked by expiry, not by an object.
+    #[n(2)]
+    pub expires_at: Timestamp,
+}
+
+impl Payload for CarriageAccepted {
+    const OBJECT_TYPE: ObjectType = ObjectType::CarriageAccepted;
 }
