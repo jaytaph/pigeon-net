@@ -52,6 +52,19 @@ enum Command {
         content: String,
     },
 
+    /// Show what this node knows of an identity's current state (§5.6).
+    Resolve {
+        /// The exact identity. There is no search.
+        identity: String,
+    },
+
+    /// Publish epoch prekeys for this device (§8.1).
+    Prekeys {
+        /// How many epochs ahead to cover.
+        #[arg(long, default_value_t = 14)]
+        lookahead: u64,
+    },
+
     /// Reply to a post, inheriting its area and thread.
     Reply {
         /// The post being replied to.
@@ -156,6 +169,19 @@ fn main() -> Result<()> {
             let id = node.post(&parse_area(&area)?, &content, &passphrase()?, now_millis()?)?;
             println!("created  {id}");
             println!("queued   for subscribed peers");
+            Ok(())
+        }
+        Command::Resolve { identity } => show_resolved(&node, &identity),
+        Command::Prekeys { lookahead } => {
+            let published = node.publish_prekeys(&passphrase()?, now_millis()?, lookahead)?;
+            match published.len() {
+                0 => println!("already covered; nothing to publish"),
+                n => println!(
+                    "published {n} epoch prekeys, epochs {}..={}",
+                    published.first().copied().unwrap_or(0),
+                    published.last().copied().unwrap_or(0)
+                ),
+            }
             Ok(())
         }
         Command::Reply { parent, content } => {
@@ -373,6 +399,60 @@ fn read_area(node: &Node, area: &pigeonnet_core::AreaName) -> Result<()> {
             println!("{indent}  {line}");
         }
         println!();
+    }
+    Ok(())
+}
+
+fn show_resolved(node: &Node, identity: &str) -> Result<()> {
+    let identity =
+        pigeonnet_core::IdentityId::parse(identity).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let now = now_millis()?;
+    let snapshot = node
+        .snapshot(identity, now)?
+        .context("this node holds nothing for that identity")?;
+    let resolved = snapshot
+        .verify(pigeonnet_core::Timestamp::from_millis(now))
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    println!("identity      {}", resolved.state.id());
+    if let Some(profile) = &resolved.profile
+        && let Some(name) = &profile.display_name
+    {
+        println!("calls itself  {name}   (self-asserted; not a bound name)");
+    }
+    println!("root key      {}", resolved.state.root_key());
+    println!(
+        "usable until  {}   (clamped to its contents, not the server's claim)",
+        render::iso8601(resolved.valid_until.as_millis())
+    );
+    println!();
+
+    println!("prekeys       {}", resolved.prekeys.len());
+    let mut prekeys = resolved.prekeys.clone();
+    prekeys.sort_by_key(|(_, prekey)| prekey.epoch);
+    for (device, prekey) in &prekeys {
+        println!(
+            "  epoch {:<6} until {}  device {}",
+            prekey.epoch,
+            render::iso8601(prekey.valid_until.as_millis()),
+            &device.to_string()[..24]
+        );
+    }
+    println!();
+
+    if resolved.carriers.is_empty() {
+        println!("carriers      none confirmed");
+    } else {
+        println!("carriers      {} confirmed", resolved.carriers.len());
+        for carrier in &resolved.carriers {
+            println!("  cost {:<4} {}", carrier.cost, carrier.node);
+        }
+    }
+    for carrier in &resolved.unconfirmed {
+        println!(
+            "  UNCONFIRMED  {}  (claimed, but it has not consented)",
+            carrier.node
+        );
     }
     Ok(())
 }
