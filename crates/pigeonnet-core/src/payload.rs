@@ -509,3 +509,97 @@ pub struct CarriageAccepted {
 impl Payload for CarriageAccepted {
     const OBJECT_TYPE: ObjectType = ObjectType::CarriageAccepted;
 }
+
+// ---------------------------------------------------------------------------
+// Private messaging (§8, D4).
+// ---------------------------------------------------------------------------
+
+/// What kind of forward secrecy a message has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+#[cbor(index_only)]
+pub enum ForwardSecrecy {
+    /// Sealed to epoch prekeys. Unrecoverable once they are destroyed.
+    #[n(0)]
+    Epoch,
+    /// Sealed to a long-term identity key because no current prekey was held.
+    ///
+    /// **Displayed to both parties.** The fallback keeps offline-first working
+    /// when a sender's view of the recipient is months stale, and the cost is
+    /// that the message never becomes unreadable. Silent degradation here would
+    /// be worse than the degradation.
+    #[n(1)]
+    None,
+}
+
+/// The content key, wrapped for one of the recipient's devices.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+#[cbor(map)]
+pub struct WrappedKey {
+    /// Which device can open this entry.
+    #[n(0)]
+    pub device: PublicKeyBytes,
+
+    /// Which epoch prekey it is sealed to, or absent for the identity-key
+    /// fallback.
+    #[n(1)]
+    pub epoch: Option<u64>,
+
+    /// The content key under a key derived for this device.
+    #[cbor(n(2), with = "minicbor::bytes")]
+    pub wrapped: Vec<u8>,
+}
+
+/// Everything a direct message binds but does not hide.
+///
+/// Separated from the ciphertext so it can be canonically encoded and used as
+/// associated data: the content is then cryptographically bound to the recipient
+/// it names, the keys it was wrapped for, and the secrecy level it claims. A
+/// relay that edits any of it invalidates the message rather than redirecting it.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+#[cbor(map)]
+pub struct MessageHeader {
+    /// Who it is for. Cleartext by necessity — relays route on it (§8.2).
+    #[n(0)]
+    pub recipient: IdentityId,
+
+    /// Which set of primitives sealed it.
+    #[n(1)]
+    pub suite: u16,
+
+    /// The sender's one-shot public key, destroyed after sealing.
+    #[n(2)]
+    pub ephemeral_key: AgreementKeyBytes,
+
+    /// The weakest entry below, so a client can label the message without
+    /// inspecting every wrap.
+    #[n(3)]
+    pub fs: ForwardSecrecy,
+
+    /// One entry per device the sender sealed to (§8.1 fan-out).
+    #[n(4)]
+    pub recipients: Vec<WrappedKey>,
+}
+
+/// An encrypted message to one identity (§8).
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+#[cbor(map)]
+pub struct DirectMessage {
+    /// Bound, but not hidden.
+    #[n(0)]
+    pub header: MessageHeader,
+
+    /// The content, sealed under a key wrapped in `header.recipients`.
+    #[cbor(n(1), with = "minicbor::bytes")]
+    pub ciphertext: Vec<u8>,
+}
+
+impl Payload for DirectMessage {
+    const OBJECT_TYPE: ObjectType = ObjectType::DirectMessage;
+}
+
+impl MessageHeader {
+    /// Canonical bytes, for use as associated data.
+    pub fn to_canonical_bytes(&self) -> Result<Vec<u8>, Error> {
+        cbor::to_canonical_vec(self)
+    }
+}

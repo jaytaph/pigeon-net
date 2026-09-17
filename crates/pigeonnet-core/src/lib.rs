@@ -27,7 +27,8 @@ pub use bytes::{AgreementKeyBytes, IdentityId, NodeId, ObjectId, PublicKeyBytes,
 pub use error::Error;
 pub use object::{Object, ObjectType, Tbs};
 pub use payload::{
-    CarriageAccepted, Carrier, EchoPost, EpochPrekey, IdentityProfile, ReachabilityClaim,
+    CarriageAccepted, Carrier, DirectMessage, EchoPost, EpochPrekey, ForwardSecrecy,
+    IdentityProfile, MessageHeader, ReachabilityClaim, WrappedKey,
 };
 pub use time::Timestamp;
 

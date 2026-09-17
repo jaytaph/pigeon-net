@@ -48,6 +48,8 @@ pub enum ObjectType {
     ReachabilityClaim = 7,
     /// A carrier consenting to spool for an identity (§5.7).
     CarriageAccepted = 8,
+    /// An encrypted message to one identity (§8).
+    DirectMessage = 9,
 }
 
 impl ObjectType {
@@ -68,6 +70,7 @@ impl ObjectType {
             6 => Ok(Self::EpochPrekey),
             7 => Ok(Self::ReachabilityClaim),
             8 => Ok(Self::CarriageAccepted),
+            9 => Ok(Self::DirectMessage),
             other => Err(Error::UnknownObjectType(other)),
         }
     }
