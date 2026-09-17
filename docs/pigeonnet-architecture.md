@@ -279,6 +279,47 @@ No individual node has to be globally authoritative.
 
 ---
 
+## 4.1 Node roles are behavioural, not structural
+
+The words *hub*, *relay*, and *client* appear throughout this document as
+shorthand. **None of them is a protocol role.** There is no hub object, no
+hub-only capability, and no operation a hub can perform that an ordinary node
+cannot. A "hub" is a node with a stable address, good uptime, and a willingness
+to carry things it has no personal interest in.
+
+Four behaviours are worth naming, because they have different costs and should
+usually run on different machines:
+
+| Behaviour | What it does | Cost |
+|---|---|---|
+| **leaf** | subscribes, reads, sends; carries nothing for others | negligible |
+| **carrier** | holds `inbox:` journals for identities that named it, and serves their current state (5.6) | storage, metadata exposure |
+| **mirror** | prefetches file areas (section 10) | bandwidth |
+| **archive** | prunes nothing (D8) | storage |
+
+Same binary, same protocol, different configuration. A node may do all four or
+none.
+
+The invariant that matters, for any node acting as a carrier or relay:
+
+| Can | Cannot |
+|---|---|
+| see who talks to whom, when, and how much | read any private payload |
+| withhold, delay, reorder, or drop | forge, alter, or re-attribute an object |
+| refuse to carry an identity at all | bounce, or generate anything on its behalf |
+| lie about what it holds | hold an identity or a name hostage |
+
+Everything in the left column is real damage, and nothing in this design
+prevents it. What is prevented is the right column. **A node can hurt you by not
+acting, never by acting.**
+
+The design test for any proposed carrier feature is therefore **exit cost**:
+does it raise the price of switching away? Spooling an inbox passes — publish a
+new state snapshot and go. Owning a name fails, which is why section 5.2 pins
+names locally.
+
+---
+
 # 5. Identity
 
 ## 5.1 Cryptographic identity
@@ -326,33 +367,68 @@ See D3.
 
 ## 5.2 Human-readable addressing
 
-The network may expose FidoNet-inspired human-readable addresses.
-
-Examples:
-
-```text
-net:gosub/37/joshua
-```
-
-or:
+The network may expose FidoNet-inspired human-readable names, scoped to a
+**directory** — typically a community that already knows its members:
 
 ```text
-@joshua:37.gosub
+joshua@gosub
 ```
 
-These names resolve to cryptographic identities.
+A directory is an ordinary identity that publishes name bindings. It is not
+infrastructure, has no special status, and is added by hand
+(`nodectl directory add`) exactly as a peer is.
 
-The mapping might be provided by:
+### A binding takes two signatures
 
-- a community directory
-- a local address book
-- signed introductions
-- a DNS-like optional directory system
-- direct fingerprint exchange
+Neither side may bind unilaterally:
 
-The name is convenience.
+```text
+NameClaim   { namespace: "gosub", name: "joshua",
+              identity: id:b3:9fq2..., signature_by_device_key }
 
-The identity is the genesis object ID (section 5.1).
+NameGranted { namespace: "gosub", name: "joshua",
+              identity: id:b3:9fq2..., expires_at,
+              signature_by_directory }
+```
+
+A directory alone cannot attach a name to an identity, so it cannot squat a
+name onto someone or attribute a loaded name to them. An identity alone cannot
+mint a name in someone else's namespace.
+
+### Resolution is pin-on-first-use
+
+The first time `joshua@gosub` resolves to `id:b3:9fq2...`, **that pair is
+written to the local address book.** A later `NameGranted` rebinding the name is
+not a new answer, it is a *change*, and it stops and asks the user.
+
+This is what reduces a directory from an authority to a convenience: it can help
+find someone the first time, and it can never silently substitute them
+afterwards. SSH host keys, essentially.
+
+### Directories are mechanically accountable
+
+A directory is an identity, so its bindings are signed objects with per-key
+gapless sequences (D3). A directory that tells one node `joshua -> A` and
+another `joshua -> B` has published two objects that anyone can hold up side by
+side; if they collide on `(signing_key, sequence)` it is an automatic
+`EquivocationProof`. DNS and X.509 needed Certificate Transparency bolted on to
+obtain this property. Here it falls out of everything being an immutable
+replicated object.
+
+### Display in three tiers
+
+```text
+alice                 local petname, assigned by the user      — strongest
+joshua@gosub          directory name, pinned, namespace always shown
+id:b3:9fq2m4x7...     raw identity                             — always available
+```
+
+**A bare name is never displayed without its namespace.** A name with no
+namespace attached is a phishing vector.
+
+The name is convenience. The identity is the genesis object ID (section 5.1).
+
+See D12.
 
 ---
 
@@ -565,6 +641,241 @@ design, and it hands community administrators power over member identity —
 inverting the separation section 12 is careful to draw.
 
 See D11.
+
+---
+
+## 5.6 Identity state distribution
+
+Four separate mechanisms need the same thing and none of them had a way to get
+it: a sender needs an identity's current encryption keys (8.1), a sender needs
+its reachability (5.7), a directory lookup needs its key chain, and a carrier
+needs its key chain to authenticate an inbox query (15.4).
+
+What has to travel splits into two halves with opposite requirements. Trying to
+serve both with one mechanism is why neither fitted D5's journal model.
+
+### The chain: complete, ordered, never pruned
+
+`IdentityCreated`, `DeviceKeyGranted`, `DeviceKeyRevoked`, `KeyRotated`,
+`RootKeyReplaced`, `RecoveryKeyReplaced`, `IdentitySuccession`. All of it, in
+order, or nothing verifies. It is also tiny — a few dozen objects over a
+lifetime.
+
+**Its distribution is already solved and needs no new mechanism.** To verify any
+object a node must replay its author's key chain (3.3), so any node holding an
+object necessarily holds enough chain to verify it. This is promoted from an
+accident to a rule:
+
+> **Chain invariant.** A node that serves an object must be able to serve its
+> author's key chain up to that object's timestamp.
+
+That replaces section 16's vague "replicate wherever the identity is known" with
+something enforceable.
+
+### Current state: latest-wins, aggressively pruned
+
+`EpochPrekey`, `ReachabilityClaim`, `IdentityProfile`. Nobody ever wants the
+history: an expired prekey is garbage and last year's carrier is noise. This is
+a **snapshot fetch, not a journal** — no cursor, no ordering, no session state:
+
+```text
+A -> B   current id:b3:9fq2...
+B -> A   chain tip
+         + unexpired EpochPrekeys (all devices)
+         + latest ReachabilityClaim
+         + IdentityProfile
+         + valid_until
+```
+
+Roughly 14 KB for a three-device identity at six weeks of prekey coverage.
+
+### The snapshot carries its own expiry
+
+The snapshot has a `valid_until` — 30 days by default — covering everything
+inside it: carriers, device list, prekeys. Past that date a client refuses to
+use it and refetches.
+
+**Freshness is a property of the snapshot, not a consequence of running out of
+prekeys.** Section 8.1 currently leaks freshness by accident: a sender with a
+stale profile exhausts the prekeys it holds and falls back. That signal
+disappears entirely if lookahead is increased (section 37), so it must not be
+load-bearing. A client displays *"your view of this identity is 41 days old"*
+rather than silently degrading.
+
+### Who holds it
+
+- **Carriers**, as an obligation of `CarriageAccepted` (5.7). A carrier needs the
+  chain anyway to authenticate inbox queries, so it is holding most of it
+  regardless.
+- **Contacts**, refreshed on sync. This is what keeps prekeys fresh between
+  people who actually correspond.
+- **Any node that has ever fetched it**, since every object in the snapshot is
+  self-signed and a stranger's cached copy is exactly as trustworthy as the
+  origin's.
+
+That last property is what makes the whole thing cheap: the snapshot may be
+served by anyone, cached by anyone, and relayed through anyone, because nothing
+in it can be forged by a holder. A holder can only **withhold**.
+
+### Bootstrapping, in order of likelihood
+
+1. **Already held** — any prior contact, or a cached fetch.
+2. **Ask configured peers**: `resolve id:b3:9fq2...`, **one hop, never
+   forwarded**. Whoever has it answers. Forwarding this query would build a DHT:
+   every node would learn who is asking about whom, and the query would be
+   floodable. One hop keeps it a cache lookup.
+3. **Reverse path** — the node knows which peer handed it the post that carried
+   the identity. Ask that peer (17.1).
+4. **First contact carries it** — a `ContactRequest` includes the sender's own
+   snapshot, so replying never requires a lookup.
+
+**Resolution is by exact identity, never by search.** There is no query that
+enumerates identities, and none will be added: a searchable directory of people
+is an address harvester and a surveillance tool, and the spam model of section 14
+assumes unknown identities cannot cheaply find a target. Resolving an ID already
+held reveals nothing, because the asker must already possess the 32-byte name.
+
+### What this costs
+
+- **The snapshot is world-readable.** Device count, carrier list, and — because
+  prekeys are published on a schedule — a liveness signal. Anyone may poll it.
+  There is no fix compatible with letting strangers encrypt to you; it belongs
+  in section 8.2 beside the metadata concession.
+- **Withholding is the real attack, and it is the `fs: none` downgrade.** A
+  carrier that quietly stops serving fresh prekeys pushes every sender onto the
+  long-term identity key. Mitigated by publishing far enough ahead that
+  withholding must be sustained for weeks, and by surfacing snapshot age in the
+  client. Not eliminated.
+- **A cold ID from a stranger may be unresolvable.** If none of the four paths
+  above reaches it, the identity cannot be contacted in v1. See section 37.
+
+See D12.
+
+---
+
+## 5.7 Reachability and carriage
+
+Identity and reachability are separate (5.3). The binding between them is two
+objects, and both are required.
+
+### The identity claims
+
+```text
+ReachabilityClaim {
+    identity:   id:b3:9fq2...,
+    via:        [ node:ams-hub (cost 1), node:gosub-hub (cost 3) ],
+    expires_at: ...,
+    signature_by_device_key
+}
+```
+
+This is **not** a `RouteAdvertisement`, and conflating the two is an error:
+
+| | `RouteAdvertisement` (17.1) | `ReachabilityClaim` |
+|---|---|---|
+| Signed by | a peer, about third parties | the identity, about itself |
+| Forgeable | yes — this is route poisoning | no |
+| Propagation | one hop, never forwarded | replicates freely, in the snapshot |
+
+D6's paranoia is entirely about third-party assertions. A self-signed claim can
+poison nobody but its own author, whose worst outcome is directing their own
+mail at a node that drops it. It is therefore safe to propagate without policy,
+which is what makes 5.6 work: a sender does not have to *ask* anyone, only to
+*hold* the object.
+
+### The carrier consents
+
+A claim alone is not actionable. Without a counter-signature, any identity could
+name any node and aim the network at it — reflection, with the target chosen by
+the attacker. Local policy at the victim is not sufficient: dropping unwanted
+spool traffic still means the traffic arrived.
+
+```text
+CarriageAccepted {
+    carrier:    node:ams-hub,
+    identity:   id:b3:9fq2...,
+    expires_at: ...,
+    signature_by_carrier_device_key
+}
+```
+
+**A sender routes toward a carrier only when both objects are present and
+current.** Neither party can bind alone — the same shape as the name binding in
+5.2.
+
+Accepting carriage obliges the carrier to spool `inbox:id:b3:...` and to serve
+that identity's snapshot (5.6). It obliges nothing else, and is revocable by
+expiry.
+
+### Always list two carriers
+
+A single carrier is the configuration that turns a node outage into an identity
+outage, and it is what people will choose by default because it is simpler.
+
+With two listed, a carrier disappearing is an inconvenience: senders holding the
+snapshot already know the second address and fail over on timeout (20.4), with
+nothing to update and nothing to look up. **The second carrier must be listed
+before the outage** — that is the entire mechanism.
+
+Carriers must be independently operated. Two machines at one provider, on one
+account, are one carrier with extra steps.
+
+### Carriers may sync an inbox between themselves
+
+Two carriers named in the same current `ReachabilityClaim` may replicate that
+identity's `inbox:` stream to each other, as an ordinary stream sync (D5).
+
+This is better than sender-side fan-out: it does not double every sender's
+traffic, and it repairs *backwards* — objects that reached ams-hub before it
+died are already at gosub-hub. Deduplication is free by content address.
+
+Two constraints:
+
+- **A carrier accepts inbox objects from another carrier only for identities for
+  which it independently holds a valid `CarriageAccepted`.** Without this the
+  mechanism is an open relay: anyone could name a node in a claim and push
+  traffic through it.
+- **Each carrier is a full copy of the identity's metadata**, not an extra
+  chance of exposure. Redundancy here is not free; it is paid in traffic-graph
+  copies.
+
+Normal sending is to the lowest-cost carrier only. Fan-out happens on timeout,
+not by default.
+
+### Migration
+
+Moving carriers changes no identity, no name, and nothing held by any
+correspondent. It is not instant, and the overlap is the delicate part.
+
+```text
+1. publish a snapshot listing BOTH carriers, new one at lower cost
+2. push it to peers, contacts, and both carriers — not to one place
+3. keep collecting from the old carrier until its traffic stops
+4. publish a snapshot listing the new carrier only
+5. release carriage at the old carrier
+```
+
+The snapshot's `valid_until` is what bounds the tail: after that date no
+correspondent is using a stale copy, because their client refuses to.
+
+Failure modes, none of which are eliminated:
+
+- **Cut over too early and mail is lost silently.** The old carrier no longer
+  spools, the object expires at some intermediate node, and no bounce is
+  generated (section 16). The sender learns only from a local timeout.
+- **Uncollected spool at the old carrier is stranded.** Sync once more before
+  releasing.
+- **A hostile old carrier can serve a stale snapshot for one `valid_until`.** It
+  cannot forge a new one. Short expiry bounds the damage; asking several peers
+  routes around it.
+- **Both carriers dying at once** requires publishing a new snapshot and waiting
+  for it to spread — days, not seconds. There is no fast path without a global
+  directory, and there will not be one.
+
+`nodectl carrier move <new>` should perform the whole sequence. Performed by
+hand in the wrong order, it loses mail.
+
+See D13.
 
 ---
 
@@ -1250,6 +1561,56 @@ later as additional stream types without a flag day.
 
 They stay deferred until measurement shows journals are the bottleneck.
 
+---
+
+## 15.4 Stream access classes
+
+There is no account, no registration, and no acceptance step to read from a
+node. A node answers whoever connects, subject only to its own quotas. What
+gates a query is the **class of stream**, not the identity of the asker:
+
+| Stream | Who may query |
+|---|---|
+| `echo://…` public areas | anyone |
+| `files://…` manifests and chunks | anyone |
+| `current id:b3:…` identity snapshots (5.6) | anyone |
+| `inbox:id:b3:X` | X alone, proving it |
+| closed community areas | members, proving it |
+
+A brand-new identity nobody has heard of can pull an area, read years of
+history, fetch a file, and leave. **The network must be readable before anyone
+has a reason to join it.**
+
+The asymmetry matters: an inbox stream open to all peers would make any
+identity's complete correspondence graph — senders, sizes, timing — globally
+fetchable from any carrier in the world. So the inbox query, and a closed-area
+query, carry a device-key signature over a nonce supplied by the serving node.
+Public streams carry nothing.
+
+Three gates are easy to conflate, and none of them is "may I read this node":
+
+- `peer add` — the asker's decision about whom *it* talks to. The peer does not
+  consent to being peered with; it answers or it does not.
+- `contact accept` — who may place objects in an inbox (section 14). Unrelated
+  to reading.
+- community membership — closed areas only.
+
+**A node is never obliged.** Quotas are local policy (section 30), so serving
+public echoes only to configured peers, throttling strangers, or refusing
+unknown connections entirely is legitimate — a home node on a domestic line
+probably should. "Anyone may ask" and "the node may decline" are both true.
+
+Two consequences worth stating in user-facing documentation:
+
+- **Public is permanent and global.** Every echo post is fetchable by any
+  stranger, from any node that kept it, with its author cryptographically
+  attached, with no deletion (section 21). That is a stronger exposure than email
+  intuitions carry over.
+- **A closed area limits distribution, never disclosure.** Nothing prevents a
+  member republishing its contents into an open one, and nothing can.
+
+See D15.
+
 See D5.
 
 ---
@@ -1260,7 +1621,7 @@ Propagation policy is a function of object class.
 
 | Object class | Propagation |
 |---|---|
-| Echo post | flood to peers subscribed to that area |
+| Echo post | pulled by peers subscribed to that area |
 | File manifest | replicate to subscribers of the file area |
 | File chunks | fetched on demand; mirrors may prefetch |
 | Direct message | forward along the best known route toward the recipient |
@@ -1268,11 +1629,19 @@ Propagation policy is a function of object class.
 | Key management | replicate wherever the identity is known |
 | Route advertisement | one hop only, never forwarded |
 
-Flooding is deduplicated by object ID, which content addressing provides for
-free: a node that already holds an object neither stores nor forwards it twice.
+Echo propagation is **pull-based**: a subscriber asks each peer what it holds in
+an area after the subscriber's own cursor, and fetches only what it lacks (§15).
+Nothing is pushed.
 
-Loop suppression additionally uses a bounded `seen_by` node list and a hop
-ceiling, after FidoNet's `SEEN-BY` and `PATH`.
+That removes the need for loop suppression rather than solving it. A cycle in the
+peer graph has no fuel: a node offered the same object by two peers fetches its
+bytes once, because content addressing makes deduplication free, and asks for
+nothing on later passes because its cursor has already moved. A redundant edge
+costs a list of identifiers, not a storm.
+
+Loop suppression does apply to **directed forwarding**, where a node genuinely
+pushes an object along a route toward a recipient. There a bounded `seen_by` node
+list and a hop ceiling are used, after FidoNet's `SEEN-BY` and `PATH`.
 
 **`seen_by` travels in the unsigned transfer envelope, never inside the signed
 object.** Putting it in the object would change the object's ID at every hop,
@@ -1314,12 +1683,28 @@ file:b3:9c41f0a2  -> peer:mirror3
 
 ## 17.1 Where routes come from
 
-v1 has two sources and no more.
+Two questions are routinely conflated and have different answers:
 
-**Static configuration.** Peers are configured by the operator. There is no DHT
-and no global discovery.
+```text
+where is node:ams-hub          -> an address. Static config, or 17.4 discovery.
+where is id:b3:9fq2...         -> a carrier. The identity's own claim (5.7).
+```
 
-**Signed route advertisements**, from those configured peers:
+Neither is a routing protocol. **There is no discovery of paths, no distributed
+table, and no mechanism that will find a route where none is configured or
+claimed.** The reachable set is the operator's neighbourhood, not the world.
+This is a consequence of refusing both a global authority (section 2) and a DHT
+(below), and it is a real limit rather than an omission.
+
+Route sources in v1, in decreasing authority:
+
+**Static configuration.** Peers configured by the operator.
+
+**Reachability claims.** An identity's own self-signed statement of its carriers
+(5.7), obtained with its snapshot (5.6). This is how an identity is located; a
+route advertisement is not.
+
+**Signed route advertisements**, from configured peers, for reaching *nodes*:
 
 ```text
 RouteAdvertisement {
@@ -1348,6 +1733,13 @@ rules are therefore strict:
 Advertisements are not forwarded. Learning a route means learning it, one hop
 away, from a peer already chosen and trusted for routing.
 
+**Reverse-path hints.** When an object arrives, the node knows which peer handed
+it over. That peer is a usable hint for reaching the object's author or its
+carrier — ranked below everything else, expiring quickly, never overriding a
+static route or a reachability claim. Without it, "reply to someone read in an
+echo" does not work at all, which is the single most common way a contact begins
+(5.6).
+
 ---
 
 ## 17.3 Deferred
@@ -1356,6 +1748,83 @@ Distributed discovery, community-scoped directories, and the multi-path or onion
 routing of section 8.4 are out of scope for v1.
 
 There is no global routing authority, and adding one would contradict section 2.
+
+---
+
+## 17.4 Node discovery
+
+Addresses of *nodes* — not identities, and not people — may be discovered, and
+this is safe in a way BGP-style advertisement is not.
+
+```text
+NodeProfile {
+    node:        node:ams-hub,          # the node's own identity
+    addresses:   [ tcp://node.example.net:4137 ],
+    carries:     [ echo://GOSUB.DEV, files://GOSUB.RELEASES ],
+    policy:      { spools_for: "members of community:gosub",
+                   accepts_unknown_peers: true },
+    expires_at:  ...,
+    signature_by_node_device_key
+}
+```
+
+**Publishing and relaying are different verbs.** A node signs its own profile;
+anyone may relay that profile onward. Relaying is *carrying*, not *asserting* —
+a relayed profile cannot be tampered with, and a false one is self-correcting,
+because connecting to the address either produces the claimed node identity or
+does not. This is the property BGP lacks, and it is why gossiping profiles does
+not reproduce BGP's failure modes.
+
+**Accepting a profile is passive.** It enters a local candidate table. It changes
+no routing, adds no peer, and stores nothing on anyone's behalf. `peer add`
+remains a command the operator types. Nobody can announce *at* a node; anyone may
+announce *into the commons*.
+
+**Publication is opt-in, and leaf nodes never appear.** Silence is the default.
+A leaf that ends up in the global table receives connection attempts from
+strangers forever.
+
+### Quality is measured locally and never shared
+
+```text
+node:ams-hub    addr node.example.net:4137
+                last ok 2026-09-16 08:12   latency 40ms
+                attempts 412  failures 3
+                relayed_via peer:eu-hub    first seen 2026-03-02
+```
+
+Everything below the address is local measurement, and none of it is replicated.
+A shared score would be a global consensus artifact, which section 2 refuses,
+and it would also be wrong: "fast" has a different answer in Utrecht than in
+Sydney, and a node down for one observer may be healthy for another. **Gossip
+addresses; measure quality; never relay quality.**
+
+- **Rank unknowns by provenance.** A fresh entry has no measurements attached,
+  which is exactly when junk arrives. `relayed_via` is the only signal available
+  at that moment: a profile that came through a deliberately chosen peer
+  outranks one that appeared from nowhere. Cap profiles accepted per peer per
+  sync, so a peer relaying garbage has its whole batch discounted — which makes
+  relaying garbage costly to the relayer.
+- **Decay, do not blacklist.** Nodes go down for a week and return. Scores fade
+  toward neutral with age; a single failure never evicts.
+- **Address and identity stay separate.** A profile binds a node *identity* to an
+  address, and the node proves that identity on connect before anything else
+  happens. A stale or hijacked address therefore yields a failed handshake, not a
+  hostile peer. Addresses may be wrong; identities may not.
+
+### Why not a nodelist
+
+A signed, curated nodelist file distributed through a file echo (section 10) is
+the FidoNet answer and remains a perfectly good option — competing lists are
+fine, since a list is a hint. It needs a maintainer, which is a social
+institution, and FidoNet's died of exactly that. Gossiped self-signed profiles
+obtain the same result with no institution, at the cost of admitting junk that
+must be scored away.
+
+The open area carrying profiles inherits the public-echo spam problem in a
+consequential place (section 37).
+
+See D14.
 
 See D6.
 
@@ -1645,6 +2114,10 @@ Identity and keys:
 ```text
 IdentityCreated          # genesis; its object ID is the identity
 IdentityProfile
+ReachabilityClaim
+CarriageAccepted
+NameClaim
+NameGranted
 KeyRotated
 RootKeyReplaced
 RecoveryKeyReplaced
@@ -1689,9 +2162,13 @@ Network:
 
 ```text
 RouteAdvertisement
-PeerAnnouncement
+NodeProfile
 DeliveryReceipt
 ```
+
+`PeerAnnouncement` is removed. It was never specified, and section 17.4's
+self-signed `NodeProfile` covers the need without inventing a push channel for
+"add me".
 
 `FileChunk` is deliberately absent. Chunks are raw byte ranges verified against a
 `FileManifest` root hash (section 9), not signed objects in their own right —
@@ -2154,7 +2631,7 @@ v1 of the object format and replication protocol, and records what it supersedes
 earlier in this document. Where a decision contradicts an earlier section, the
 decision wins and the earlier section is scheduled for rewrite.
 
-Decisions are numbered `D1`..`D11` so they can be cited from code and commits.
+Decisions are numbered `D1`..`D15` so they can be cited from code and commits.
 
 ---
 
@@ -2416,12 +2893,20 @@ until measurements justify it.
   configured peers, **only** for targets inside a configured scope, and never
   lets an advertisement override a static route. Advertisements are ranked
   hints, never authority.
-- Echo propagation is subscription flooding, deduplicated by object ID — which
-  content addressing provides for free — plus a bounded `seen_by` node list and
-  a hop ceiling, after FidoNet's `SEEN-BY` / `PATH`.
-- **`seen_by` travels in the unsigned transfer envelope, never inside the signed
-  object.** Putting it in the object would change the object ID at every hop and
-  destroy content addressing.
+- Echo propagation is **pull-based**, not flooding. A node asks its peers what
+  they hold in an area after its own cursor, and fetches only what it lacks (D5).
+- **Amended after M4.** This originally specified subscription flooding with a
+  bounded `seen_by` list and a hop ceiling, after FidoNet's `SEEN-BY` / `PATH`.
+  Building it showed those are unnecessary for echoes: nobody pushes, so there is
+  no storm to suppress, and content addressing deduplicates for free. In a
+  triangle, a node offered one object by two peers fetches its bytes once and
+  refetches nothing thereafter, however long the cycle runs. Verified by test.
+- `seen_by` and hop ceilings remain the right answer for **directed forwarding** —
+  carrying a private message toward a recipient (§8.3) — where a node does push,
+  and for any future low-latency push mode (§18). They are not echo machinery.
+- **Wherever push does apply, `seen_by` travels in the unsigned transfer
+  envelope, never inside the signed object.** Putting it in the object would
+  change the object ID at every hop and destroy content addressing.
 - Private messages route along the best known path toward the recipient, under a
   hop ceiling and a per-object TTL. Undeliverable objects expire locally and
   generate no bounce — a bounce is a mailbox concept (section 35).
@@ -2689,6 +3174,169 @@ separation section 12 draws.
 
 ---
 
+## D12. Identity state: chain by invariant, current state by snapshot
+
+**Decision**
+
+- An identity's **key chain** replicates by the **chain invariant**: a node that
+  serves an object must be able to serve that object's author's key chain up to
+  the object's timestamp. No dedicated stream, because verification already
+  requires it.
+- An identity's **current state** — unexpired `EpochPrekey`s for every device,
+  the latest `ReachabilityClaim`, and `IdentityProfile` — is fetched as a
+  **snapshot**, not a journal: `current id:b3:...`, no cursor, no session state.
+  About 14 KB for three devices.
+- The snapshot carries its own `valid_until`, 30 days by default. **Freshness is
+  a property of the snapshot, never a side effect of prekey exhaustion.** Clients
+  display snapshot age rather than degrading silently.
+- Everything in a snapshot is self-signed, so **any node may serve it and a
+  cached copy is as trustworthy as the origin's.** A holder can withhold, never
+  forge.
+- Bootstrap order: already held; `resolve id:b3:...` to configured peers, **one
+  hop, never forwarded**; reverse-path hint (17.1); or carried inside a
+  `ContactRequest`.
+- **Resolution is by exact identity only. There is no search, no enumeration,
+  and no people directory — ever.**
+
+**Rationale**
+
+Four unrelated mechanisms — encryption (8.1), routing to an identity (5.7),
+naming (5.2), and inbox authentication (15.4) — all needed identity state and
+none had a way to obtain it. They divide cleanly into material that must be
+complete and ordered, and material where only the latest version is ever wanted.
+The first is free; the second does not fit a cursor model and should not have
+been forced into one.
+
+Forwarding `resolve` would build a DHT: every node would learn who asks about
+whom, and the query would be floodable. One hop keeps it a cache lookup against
+peers already chosen.
+
+**Honest limits**
+
+- The snapshot is world-readable: device count, carriers, and a liveness signal
+  from prekey publication. No fix is compatible with letting strangers encrypt.
+- Withholding fresh prekeys is a downgrade attack onto `fs: none` (D4).
+- A cold identity whose snapshot none of the four paths reaches cannot be
+  contacted in v1 (section 37).
+
+*Supersedes: 5.2; extends 8.1, 16.*
+
+---
+
+## D13. Reachability: self-signed claims, counter-signed carriage
+
+**Decision**
+
+- `ReachabilityClaim` is signed by the **identity**, listing carrier nodes with
+  costs and an expiry. It travels in the snapshot (D12) and replicates freely.
+  It is **not** a `RouteAdvertisement` and is not subject to D6's restrictions,
+  because a self-signed claim can only misdirect its own author's traffic.
+- `CarriageAccepted` is signed by the **carrier**. A sender routes toward a
+  carrier only when both objects are present and current. Neither party binds
+  alone.
+- Accepting carriage obliges the carrier to spool `inbox:id:b3:...` and to serve
+  that identity's snapshot. Nothing else.
+- **Two independently operated carriers are the recommended configuration**, and
+  the second must be listed before an outage, not after.
+- Carriers named in the same current claim may replicate that identity's inbox
+  stream between themselves, **each accepting only for identities for which it
+  independently holds a `CarriageAccepted`.** Normal sending goes to the
+  lowest-cost carrier; fan-out is a timeout behaviour.
+- Migration is: publish both, drain the old, publish the new alone, release. The
+  snapshot's `valid_until` bounds the tail.
+
+**Rationale**
+
+Unilateral claims would let any identity aim network traffic at any node —
+reflection with an attacker-chosen target — and local policy at the victim is
+insufficient, since dropping unwanted traffic still means it arrived. The
+counter-signature makes the pair verifiable, so senders never generate it.
+
+Carrier-to-carrier sync beats sender-side fan-out: it does not double every
+sender's traffic, and it repairs backwards, so objects delivered before a
+carrier failed are already at the survivor.
+
+**Honest limits**
+
+Each carrier holds a complete copy of the identity's traffic metadata.
+Redundancy is paid for in exposure, not free. A departing carrier can serve a
+stale snapshot for one `valid_until`, though it cannot forge a new one. Losing
+all carriers at once means republishing and waiting days.
+
+*Supersedes: 5.3; extends 17, 20.*
+
+---
+
+## D14. Node discovery: self-signed profiles, relayed freely, scored locally
+
+**Decision**
+
+- A node may publish a self-signed `NodeProfile` carrying its identity,
+  addresses, the areas it carries, and its policy. **Opt-in; silence is the
+  default, and leaf nodes do not publish.**
+- Profiles propagate as ordinary objects. **Anyone may relay any node's profile;
+  only a node may author its own.**
+- Accepting a profile is passive — it becomes a local candidate. `peer add`
+  stays manual. There is no push channel by which a node can be announced *at*
+  another node.
+- Reachability, latency, and reliability are **measured locally and never
+  replicated.** Unknown profiles are ranked by `relayed_via` provenance, capped
+  per peer per sync. Scores decay rather than blacklist.
+- A node proves its identity on connect, so a wrong address yields a failed
+  handshake rather than a hostile peer.
+- A curated signed nodelist distributed via a file echo remains a permitted
+  alternative, with no special status.
+
+**Rationale**
+
+This is not BGP. BGP's danger is unverifiable third-party claims about
+reachability; a self-signed profile is verified by connecting, and a lie is
+self-correcting. Relaying is carrying, not asserting.
+
+Sharing measured quality would be a global consensus artifact (section 2) and
+would also be incorrect, since quality is observer-relative.
+
+**Honest limits**
+
+Profiles are cheap to mint, so the carrying area inherits the public-echo spam
+problem (section 37). It is also a public census of infrastructure: every
+participating carrier becomes enumerable and targetable. Acceptable for
+carriers, which are public by nature — which is why leaves must never appear.
+
+*Replaces the unspecified `PeerAnnouncement`; extends 17.*
+
+---
+
+## D15. Stream access: open echoes, authenticated inboxes
+
+**Decision**
+
+- No account, registration, or acceptance step exists for reading from a node.
+  Access is gated by **stream class**, not by asker identity.
+- `echo://`, `files://`, and `current id:b3:...` are answerable to anyone.
+- `inbox:id:b3:X` requires a device-key signature from X over a nonce supplied by
+  the serving node. Closed community areas require an equivalent membership
+  proof.
+- Any node may decline anyone under section 30 quotas. "Anyone may ask" and "the
+  node may refuse" are both true.
+
+**Rationale**
+
+The network has to be readable before anyone has a reason to join it, which is
+the Usenet property and is deliberate. But an unauthenticated inbox stream would
+make any identity's complete correspondence graph globally fetchable from any
+carrier, which is a far larger disclosure than section 8.2's concession that
+relays on the path see metadata.
+
+**Honest limits**
+
+Public means permanent and global, with no deletion (section 21). A closed area
+limits distribution, never disclosure: nothing stops a member republishing it.
+
+*Extends: 15, 30.*
+
+---
+
 ## Multiple devices
 
 Decided in **D3**: one root identity, several delegated device keys, each with
@@ -2798,6 +3446,23 @@ sender
 
 reconsider it.
 
+**But be precise about what is forbidden.** A carrier holding an `inbox:`
+journal for an identity (5.7) *is* a spool at a named server holding objects
+addressed to one person, and pretending otherwise is dishonest. Storage at a
+relay is inherent to store-and-forward; FidoNet spooled at hubs too.
+
+What ruins email is not the spool. It is **the mailbox appearing in the
+address**. Here it does not:
+
+- the address is `id:b3:9fq2...`, which names no server
+- the carrier cannot read the spool, sign as the identity, or hold its name
+- an identity may list several carriers, and drop one, with no correspondent
+  updating anything
+- moving is a new snapshot, not a new identity
+
+So the rule is not "no storage at relays". It is **no coupling between identity
+and the node that stores for it**.
+
 The intended abstraction is:
 
 ```text
@@ -2832,3 +3497,86 @@ The key rule is:
 > **There are no mailboxes. There are identities, immutable objects, subscriptions, peers, and replication.**
 
 That rule should guide protocol and implementation decisions throughout the experiment.
+
+---
+
+# 37. Open Questions
+
+Unlike section 33, nothing here is decided. These are known gaps, recorded so
+they are not rediscovered.
+
+## 37.1 Epoch length and lookahead versus backup exposure
+
+Weekly epochs instead of daily look clearly better: worst-case message lifetime
+moves from 31 to 37 days, which nobody notices, and publishing becomes
+infrequent enough that the daily-publication liveness leak disappears.
+
+**Lookahead is the unresolved part, and it is the main control on the compromise
+window — not a convenience parameter.** Publishing far ahead makes offline-first
+work: a node that has not synced in months never runs its correspondents dry and
+never forces them onto `fs: none`. But the private halves must be retained, so a
+leaked backup stops being a window into the past and becomes a **standing
+wiretap on the future**: a June backup with a year of lookahead decrypts traffic
+through December, written by people who have no idea anything happened. That
+directly contradicts D9's claim that an old leak opens only its own epoch.
+
+Candidates, none adopted:
+
+1. **Bind the epoch to the calendar.** A week-30 public key may only *seal*
+   during week 30, recorded in the object. A stolen backup then yields only
+   live-week traffic, which is ordinary device compromise. Needs a generous
+   delivery window afterwards, or store-and-forward breaks.
+2. **Derive private halves from a seed** rather than storing them, and ratchet
+   the seed forward. Shrinks nothing by itself, but makes destruction coherent —
+   there is no file the filesystem may have copied three times — and makes the
+   others cheap.
+3. **Split the seed, cold and warm.** The private key needs both halves; the
+   warm half lives on the node, the cold half is advanced on a quarterly
+   schedule. A leaked backup then exposes one quarter. Strongest guarantee,
+   most friction.
+4. **Exclude key material from node backups entirely**, by default. Not
+   cryptography, free, and it removes the stated scenario rather than shrinking
+   it.
+
+Provisional leaning: 4 immediately, 2 in v1 so the seed structure does not need
+a format break later, 1 or 3 only if measurement or threat model demands it.
+Lookahead defaults to roughly a quarter, configurable, with the exposure stated
+in the documentation rather than buried.
+
+## 37.2 Public echo abuse
+
+Section 14 and D7 gate **private** messages only. Public areas are open by
+design: anyone may post to `GOSUB.DEV` and it replicates to every subscriber,
+with moderation (section 12) applied after the fact and per community. That is
+Usenet's model, and Usenet lost.
+
+This now has a second, more consequential instance: the open area carrying
+`NodeProfile` objects (17.4), where junk enters everyone's candidate table.
+Per-peer ingest caps and provenance ranking blunt it. Neither is a solution.
+
+## 37.3 Cold identity resolution
+
+An identity obtained out of band — a bare ID on paper from a stranger — may be
+unresolvable if none of D12's four paths reaches it. The realistic answers are
+social rather than protocol: distribute a carrier alongside the ID, have the
+introducer relay the snapshot, or accept the limit and document it. Every
+ordinary way of meeting someone — reading an echo, an introduction, an
+invitation, meeting in person — already carries the snapshot with the ID.
+
+## 37.4 Metadata concentration at carriers
+
+Section 8.2 concedes that a relay on the path sees author and recipient. A
+carrier sees it for its entire catchment, continuously, and D13 encourages
+listing two, which doubles the copies rather than halving the exposure. This is
+the strongest argument for section 8.4's sealed recipient metadata eventually,
+and until then it deserves plain statement in user-facing documentation: *your
+carrier holds your complete social graph.*
+
+## 37.5 Per-key sequence verification under partial replication
+
+Section 3.3 step 4 requires confirming that `sequence` follows the last seen
+sequence for a signing key. Under partial replication a node sees only the
+fraction of a key's output that landed in streams it subscribes to, so gaps are
+the normal case and carry no information. Either the check weakens to "never
+decreases", or gaplessness requires a per-key stream that nothing obliges anyone
+to carry.
