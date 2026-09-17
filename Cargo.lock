@@ -684,6 +684,7 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
  "hkdf",
+ "minicbor",
  "pigeonnet-core",
  "rand_core 0.10.1",
  "secrecy",
