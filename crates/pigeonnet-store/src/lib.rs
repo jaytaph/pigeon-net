@@ -100,7 +100,27 @@ impl ObjectStore {
              CREATE INDEX IF NOT EXISTS objects_by_author
                  ON objects (author, signing_key, sequence);
              CREATE INDEX IF NOT EXISTS objects_by_type
-                 ON objects (type_code, timestamp);",
+                 ON objects (type_code, timestamp);
+
+             -- Append-only journal, one per replication stream (D5).
+             -- `stream` is an opaque key: the store has no business knowing
+             -- what a stream means, only that entries under one never move.
+             CREATE TABLE IF NOT EXISTS journal (
+                 stream    BLOB NOT NULL,
+                 position  INTEGER NOT NULL,
+                 object_id BLOB NOT NULL,
+                 PRIMARY KEY (stream, position)
+             ) STRICT;
+             CREATE UNIQUE INDEX IF NOT EXISTS journal_stream_object
+                 ON journal (stream, object_id);
+
+             -- How far we have read each peer's journal, per stream.
+             CREATE TABLE IF NOT EXISTS cursors (
+                 peer     BLOB NOT NULL,
+                 stream   BLOB NOT NULL,
+                 position INTEGER NOT NULL,
+                 PRIMARY KEY (peer, stream)
+             ) STRICT;",
         )?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
 
@@ -203,6 +223,138 @@ impl ObjectStore {
             |row| row.get(0),
         )?;
         Ok(value.map(i64::cast_unsigned))
+    }
+
+    /// Append an object to a stream's journal, returning its position.
+    ///
+    /// Positions start at 1, so a cursor of 0 means "nothing yet" without
+    /// needing a sentinel. Appending the same object twice returns the position
+    /// it already has: journals are append-only, and moving an entry would
+    /// rewind every peer's cursor that had passed it.
+    pub fn journal_append(&self, stream: &[u8], id: ObjectId) -> Result<u64, StoreError> {
+        if let Some(existing) = self.journal_position(stream, id)? {
+            return Ok(existing);
+        }
+        let next: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(position), 0) + 1 FROM journal WHERE stream = ?1",
+            params![stream],
+            |row| row.get(0),
+        )?;
+        self.conn.execute(
+            "INSERT INTO journal (stream, position, object_id) VALUES (?1, ?2, ?3)",
+            params![stream, next, id.as_bytes().as_slice()],
+        )?;
+        Ok(next.cast_unsigned())
+    }
+
+    /// Where an object sits in a stream's journal, if at all.
+    pub fn journal_position(&self, stream: &[u8], id: ObjectId) -> Result<Option<u64>, StoreError> {
+        let position: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT position FROM journal WHERE stream = ?1 AND object_id = ?2",
+                params![stream, id.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(position.map(i64::cast_unsigned))
+    }
+
+    /// Journal entries after a position, ascending, and whether more remain.
+    ///
+    /// Asks for one more than `limit` so that "is there more" is answered by the
+    /// same query rather than a second count.
+    pub fn journal_after(
+        &self,
+        stream: &[u8],
+        after: u64,
+        limit: usize,
+    ) -> Result<(Vec<(u64, ObjectId)>, bool), StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT position, object_id FROM journal
+             WHERE stream = ?1 AND position > ?2
+             ORDER BY position
+             LIMIT ?3",
+        )?;
+        let probe = i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX);
+        let rows = statement.query_map(params![stream, after.cast_signed(), probe], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+
+        let mut entries = Vec::new();
+        for row in rows {
+            let (position, id) = row?;
+            let id: [u8; 32] = id.as_slice().try_into().map_err(|_| {
+                StoreError::Corrupt(pigeonnet_core::Error::BadLength {
+                    field: "object_id",
+                    expected: 32,
+                    actual: id.len(),
+                })
+            })?;
+            entries.push((position.cast_unsigned(), ObjectId::from_bytes(id)));
+        }
+        let more = entries.len() > limit;
+        entries.truncate(limit);
+        Ok((entries, more))
+    }
+
+    /// Identifiers within a bounded journal range, for repair (D5).
+    pub fn journal_range(
+        &self,
+        stream: &[u8],
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<ObjectId>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT object_id FROM journal
+             WHERE stream = ?1 AND position >= ?2 AND position <= ?3
+             ORDER BY position",
+        )?;
+        let rows = statement.query_map(
+            params![stream, from.cast_signed(), to.cast_signed()],
+            |row| row.get::<_, Vec<u8>>(0),
+        )?;
+
+        let mut ids = Vec::new();
+        for row in rows {
+            let bytes = row?;
+            let id: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+                StoreError::Corrupt(pigeonnet_core::Error::BadLength {
+                    field: "object_id",
+                    expected: 32,
+                    actual: bytes.len(),
+                })
+            })?;
+            ids.push(ObjectId::from_bytes(id));
+        }
+        Ok(ids)
+    }
+
+    /// How far we have read a peer's journal for a stream.
+    pub fn cursor(&self, peer: &[u8], stream: &[u8]) -> Result<u64, StoreError> {
+        let position: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT position FROM cursors WHERE peer = ?1 AND stream = ?2",
+                params![peer, stream],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(position.map_or(0, i64::cast_unsigned))
+    }
+
+    /// Record a cursor position.
+    ///
+    /// Never moves backwards: a peer that offered us a lower position than we
+    /// already hold is either corrupt or trying to make us re-fetch history, and
+    /// the store refuses to help either way.
+    pub fn set_cursor(&self, peer: &[u8], stream: &[u8], position: u64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO cursors (peer, stream, position) VALUES (?1, ?2, ?3)
+             ON CONFLICT (peer, stream) DO UPDATE SET position = MAX(position, excluded.position)",
+            params![peer, stream, position.cast_signed()],
+        )?;
+        Ok(())
     }
 
     /// Every object authored by an identity, in chain order.
@@ -308,6 +460,70 @@ mod tests {
         let author = IdentityId::from_bytes([9; 32]);
         let key = PublicKeyBytes::from_bytes([4; 32]);
         assert_eq!(store.highest_sequence(author, key).unwrap(), Some(u64::MAX));
+    }
+
+    #[test]
+    fn journal_positions_start_at_one_and_increase() {
+        let store = ObjectStore::open_in_memory().unwrap();
+        let a = store.put(&object(0, b"a"), 1).unwrap();
+        let b = store.put(&object(1, b"b"), 1).unwrap();
+        assert_eq!(store.journal_append(b"all", a).unwrap(), 1);
+        assert_eq!(store.journal_append(b"all", b).unwrap(), 2);
+    }
+
+    #[test]
+    fn journal_append_is_idempotent() {
+        // Re-appending must not move an entry: every peer past it would rewind.
+        let store = ObjectStore::open_in_memory().unwrap();
+        let a = store.put(&object(0, b"a"), 1).unwrap();
+        assert_eq!(store.journal_append(b"all", a).unwrap(), 1);
+        assert_eq!(store.journal_append(b"all", a).unwrap(), 1);
+        let (entries, _) = store.journal_after(b"all", 0, 10).unwrap();
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn journals_are_independent_per_stream() {
+        let store = ObjectStore::open_in_memory().unwrap();
+        let a = store.put(&object(0, b"a"), 1).unwrap();
+        assert_eq!(store.journal_append(b"one", a).unwrap(), 1);
+        assert_eq!(store.journal_append(b"two", a).unwrap(), 1);
+        assert_eq!(store.journal_after(b"one", 0, 10).unwrap().0.len(), 1);
+    }
+
+    #[test]
+    fn journal_after_reports_whether_more_remain() {
+        let store = ObjectStore::open_in_memory().unwrap();
+        for n in 0..5 {
+            let id = store.put(&object(n, b"x"), 1).unwrap();
+            store.journal_append(b"all", id).unwrap();
+        }
+        let (entries, more) = store.journal_after(b"all", 0, 3).unwrap();
+        assert_eq!(entries.len(), 3);
+        assert!(more);
+
+        let (entries, more) = store.journal_after(b"all", 3, 3).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(!more);
+    }
+
+    #[test]
+    fn cursors_never_move_backwards() {
+        let store = ObjectStore::open_in_memory().unwrap();
+        assert_eq!(store.cursor(b"peer", b"all").unwrap(), 0);
+        store.set_cursor(b"peer", b"all", 10).unwrap();
+        store.set_cursor(b"peer", b"all", 4).unwrap();
+        assert_eq!(store.cursor(b"peer", b"all").unwrap(), 10);
+    }
+
+    #[test]
+    fn journal_range_is_bounded() {
+        let store = ObjectStore::open_in_memory().unwrap();
+        for n in 0..10 {
+            let id = store.put(&object(n, b"x"), 1).unwrap();
+            store.journal_append(b"all", id).unwrap();
+        }
+        assert_eq!(store.journal_range(b"all", 3, 5).unwrap().len(), 3);
     }
 
     #[test]
