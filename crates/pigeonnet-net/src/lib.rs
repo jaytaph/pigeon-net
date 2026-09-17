@@ -7,6 +7,10 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod peer;
+
+pub use peer::{CONNECTION_TIMEOUT, DEFAULT_PORT, SyncReport, serve, sync_peer};
+
 use pigeonnet_proto::{Input, Limits, Message, Output, ProtocolError, Replica, Session};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
@@ -18,8 +22,10 @@ pub enum NetError {
     Io(std::io::Error),
     /// The peer broke the protocol.
     Protocol(ProtocolError),
-    /// The peer hung up mid-session.
+    /// The peer hung up mid-session, or took too long.
     Disconnected,
+    /// The local node failed.
+    Node(String),
 }
 
 impl core::fmt::Display for NetError {
@@ -28,6 +34,7 @@ impl core::fmt::Display for NetError {
             Self::Io(e) => write!(f, "{e}"),
             Self::Protocol(e) => write!(f, "{e}"),
             Self::Disconnected => f.write_str("peer disconnected mid-session"),
+            Self::Node(message) => write!(f, "local node: {message}"),
         }
     }
 }
@@ -43,6 +50,12 @@ impl From<std::io::Error> for NetError {
 impl From<ProtocolError> for NetError {
     fn from(e: ProtocolError) -> Self {
         Self::Protocol(e)
+    }
+}
+
+impl From<pigeonnet_node::NodeError> for NetError {
+    fn from(e: pigeonnet_node::NodeError) -> Self {
+        Self::Node(e.to_string())
     }
 }
 
