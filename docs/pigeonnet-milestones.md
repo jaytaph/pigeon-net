@@ -197,6 +197,23 @@ trusted.
 
 **Decisions exercised.** D2, D5.
 
+**Verified 2026-09-16.** 130 tests. Two nodes converge through a 625-byte file
+with no socket involved; `nodectl bundle export` / `import` work end to end, and
+a tampered, random, or truncated stick is refused with a legible message. A fifth
+fuzz target ran 7.1M executions on the reader without a crash.
+
+**The prediction above was half right.** A bundle reuses the `Replica` trait, the
+limits, canonical decoding, per-object signature checks and cursor semantics —
+but *not* the session state machine, because `Fetch` is a round trip and
+removable media does not have one. A bundle is the data plane without the control
+plane: the sender cannot know what the receiver lacks, so it sends everything
+after a stated position. Two-pass exchange is supported the way FidoNet did it,
+by carrying the sender's own cursors so the reply can be targeted.
+
+That the state machine did not transfer is not a layering failure; it is a real
+difference between a conversation and a parcel. Everything that matters for
+*safety* did transfer, which was the actual bet.
+
 **Risk.** Low, if M2 was layered properly. If it is expensive, that is a signal
 about M2 rather than about M3.
 
