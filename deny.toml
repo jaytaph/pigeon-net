@@ -1,0 +1,40 @@
+# Supply-chain policy. Checked in CI so the 149-crate tree cannot drift into
+# something with an obligation nobody noticed, or a known advisory.
+
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+# Every licence below is permissive. Pigeonnet itself is MIT OR Apache-2.0, and
+# nothing in the tree should impose an obligation stricter than that. A new
+# entry here is a decision, not a formality -- adding one means a dependency
+# brought a licence we had not accepted before.
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-3-Clause",
+    "BlueOak-1.0.0",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[bans]
+# Duplicate versions are a warning, not an error: the RustCrypto pre-1.0 crates
+# routinely pull two versions of a shared dependency, and forbidding it outright
+# would mean pinning transitive crates we do not control.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

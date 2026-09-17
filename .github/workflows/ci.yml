@@ -1,0 +1,63 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: format
+        run: cargo fmt --all --check
+
+      # Lint policy lives in the workspace Cargo.toml. `unwrap`, `expect` and
+      # `panic` are denied in every crate; this is the gate that enforces it.
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test --workspace
+
+      - name: build
+        run: cargo build --workspace
+
+  # The MSRV in Cargo.toml is a claim. This is what makes it true.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - run: cargo build --workspace
+
+  # Architectural boundaries from architecture §34.1 are load-bearing, not
+  # stylistic: if tokio reaches the object model, validation stops being
+  # reproducible and fuzzable. Nothing but this check enforces that.
+  layering:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: ./scripts/check-layering.sh
+
+  # Supply chain: known advisories, licence obligations, and where crates come
+  # from. Policy lives in deny.toml; adding a licence there is a decision.
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  # TODO(M1): add a `cargo fuzz` smoke run once there is a parser to fuzz.
+  # Deliberately absent in M0 -- a fuzz job with no targets reports success
+  # without having tested anything, which is worse than no job at all.
