@@ -6,13 +6,22 @@
 //! what allows every validation decision to be reproduced exactly in a test, and
 //! fuzzed without a network.
 //!
+//! It also holds no cryptography beyond BLAKE3 for content addressing. Key
+//! material is opaque here; signatures are verified in `pigeonnet-crypto`.
+//!
 //! See `docs/pigeonnet-architecture.md` §3.2, §3.3, §22 and decisions D1–D3.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod base32;
+pub mod bytes;
+pub mod cbor;
 pub mod error;
+pub mod time;
 
+pub use bytes::{AgreementKeyBytes, IdentityId, ObjectId, PublicKeyBytes, SignatureBytes};
 pub use error::Error;
+pub use time::Timestamp;
 
 /// Object format version carried by every object (§31).
 ///
