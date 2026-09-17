@@ -8,12 +8,14 @@
 
 pub mod error;
 pub mod limits;
+pub mod memory;
 pub mod message;
 pub mod replica;
 pub mod session;
 
 pub use error::ProtocolError;
 pub use limits::Limits;
+pub use memory::MemoryReplica;
 pub use message::{Features, JournalEntry, Message, PROTOCOL_VERSION, StreamId};
 pub use replica::{AcceptError, Replica, ReplicaError};
 pub use session::{Input, Output, Role, Session};
