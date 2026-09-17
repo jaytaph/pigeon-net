@@ -6,11 +6,14 @@
 //!
 //! Synchronous by design (§34.1). No async reaches this crate.
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(
+    test,
+    allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)
+)]
 
 use std::path::Path;
 
-use pigeonnet_core::{IdentityId, Object, ObjectId, PublicKeyBytes, SignatureBytes};
+use pigeonnet_core::{IdentityId, NodeId, Object, ObjectId, PublicKeyBytes, SignatureBytes};
 use rusqlite::{Connection, OptionalExtension, params};
 
 /// Schema version, bumped whenever the derived tables change shape.
@@ -55,6 +58,21 @@ impl From<pigeonnet_core::Error> for StoreError {
     fn from(e: pigeonnet_core::Error) -> Self {
         Self::Corrupt(e)
     }
+}
+
+/// A configured peer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeerRecord {
+    /// Where to reach it.
+    pub address: String,
+    /// The identity it proved, once it has proved one.
+    pub node_id: Option<NodeId>,
+    /// When it was added.
+    pub added_at: i64,
+    /// When it was last synced with.
+    pub last_sync_at: Option<i64>,
+    /// Why the last attempt failed, if it did.
+    pub last_error: Option<String>,
 }
 
 /// An object store.
@@ -122,6 +140,17 @@ impl ObjectStore {
              CREATE TABLE IF NOT EXISTS node_state (
                  key   TEXT PRIMARY KEY NOT NULL,
                  value BLOB NOT NULL
+             ) STRICT;
+
+             -- Peers this operator chose to talk to (§17.1). Static
+             -- configuration: there is no discovery, and nothing adds a row
+             -- here but `peer add`.
+             CREATE TABLE IF NOT EXISTS peers (
+                 address      TEXT PRIMARY KEY NOT NULL,
+                 node_id      BLOB,
+                 added_at     INTEGER NOT NULL,
+                 last_sync_at INTEGER,
+                 last_error   TEXT
              ) STRICT;
 
              -- Which echo areas this node carries (§6).
@@ -391,6 +420,89 @@ impl ObjectStore {
                 |row| row.get(0),
             )
             .optional()?)
+    }
+
+    /// Remember a peer. Adding the same address twice keeps the first row,
+    /// including whatever identity was pinned to it.
+    pub fn peer_add(
+        &self,
+        address: &str,
+        node_id: Option<NodeId>,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO peers (address, node_id, added_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT (address) DO NOTHING",
+            params![address, node_id.map(|n| n.as_bytes().to_vec()), now],
+        )?;
+        Ok(())
+    }
+
+    /// Forget a peer. Objects learned from it are kept: they were valid when
+    /// they arrived and remain so.
+    pub fn peer_remove(&self, address: &str) -> Result<bool, StoreError> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM peers WHERE address = ?1", params![address])?
+            > 0)
+    }
+
+    /// Every configured peer.
+    pub fn peers(&self) -> Result<Vec<PeerRecord>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT address, node_id, added_at, last_sync_at, last_error
+             FROM peers ORDER BY address",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<Vec<u8>>>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })?;
+        let mut peers = Vec::new();
+        for row in rows {
+            let (address, node_id, added_at, last_sync_at, last_error) = row?;
+            let node_id = node_id
+                .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
+                .map(NodeId::from_bytes);
+            peers.push(PeerRecord {
+                address,
+                node_id,
+                added_at,
+                last_sync_at,
+                last_error,
+            });
+        }
+        Ok(peers)
+    }
+
+    /// Pin the identity a peer proved on first contact.
+    ///
+    /// Trust on first use, like an SSH host key: the pin is what makes a later
+    /// substitution visible. Never silently overwritten.
+    pub fn peer_pin(&self, address: &str, node_id: NodeId) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE peers SET node_id = ?2 WHERE address = ?1 AND node_id IS NULL",
+            params![address, node_id.as_bytes().as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// Record how a sync went.
+    pub fn peer_record_sync(
+        &self,
+        address: &str,
+        now: i64,
+        error: Option<&str>,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE peers SET last_sync_at = ?2, last_error = ?3 WHERE address = ?1",
+            params![address, now, error],
+        )?;
+        Ok(())
     }
 
     /// Subscribe to an echo area. Subscribing twice is not an error.
@@ -682,6 +794,55 @@ mod tests {
             store.state("identity").unwrap().as_deref(),
             Some(b"second".as_slice())
         );
+    }
+
+    #[test]
+    fn peers_pin_on_first_use_and_never_silently_change() {
+        let store = ObjectStore::open_in_memory().unwrap();
+        store.peer_add("hub.example:4137", None, 1).unwrap();
+        assert_eq!(store.peers().unwrap()[0].node_id, None);
+
+        let first = NodeId::from_bytes([1; 32]);
+        store.peer_pin("hub.example:4137", first).unwrap();
+        assert_eq!(store.peers().unwrap()[0].node_id, Some(first));
+
+        // A second identity at the same address must not overwrite the pin.
+        store
+            .peer_pin("hub.example:4137", NodeId::from_bytes([2; 32]))
+            .unwrap();
+        assert_eq!(store.peers().unwrap()[0].node_id, Some(first));
+    }
+
+    #[test]
+    fn adding_a_peer_twice_keeps_the_pin() {
+        let store = ObjectStore::open_in_memory().unwrap();
+        let pinned = NodeId::from_bytes([7; 32]);
+        store.peer_add("hub:4137", Some(pinned), 1).unwrap();
+        store.peer_add("hub:4137", None, 2).unwrap();
+        assert_eq!(store.peers().unwrap()[0].node_id, Some(pinned));
+    }
+
+    #[test]
+    fn sync_results_are_recorded() {
+        let store = ObjectStore::open_in_memory().unwrap();
+        store.peer_add("hub:4137", None, 1).unwrap();
+        store
+            .peer_record_sync("hub:4137", 99, Some("connection refused"))
+            .unwrap();
+        let peer = store.peers().unwrap().remove(0);
+        assert_eq!(peer.last_sync_at, Some(99));
+        assert_eq!(peer.last_error.as_deref(), Some("connection refused"));
+
+        store.peer_record_sync("hub:4137", 100, None).unwrap();
+        assert_eq!(store.peers().unwrap()[0].last_error, None);
+    }
+
+    #[test]
+    fn removing_a_peer_reports_whether_it_existed() {
+        let store = ObjectStore::open_in_memory().unwrap();
+        store.peer_add("hub:4137", None, 1).unwrap();
+        assert!(store.peer_remove("hub:4137").unwrap());
+        assert!(!store.peer_remove("hub:4137").unwrap());
     }
 
     #[test]
