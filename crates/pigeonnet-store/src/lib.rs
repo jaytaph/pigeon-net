@@ -115,6 +115,20 @@ impl ObjectStore {
                  ON journal (stream, object_id);
 
              -- How far we have read each peer's journal, per stream.
+             -- Facts about *this* node, as opposed to objects it happens to hold.
+             -- A node cannot infer which identity is its own by inspecting its
+             -- object store: after one sync it holds other people's genesis
+             -- objects too, and they are indistinguishable from its own.
+             CREATE TABLE IF NOT EXISTS node_state (
+                 key   TEXT PRIMARY KEY NOT NULL,
+                 value BLOB NOT NULL
+             ) STRICT;
+
+             -- Which echo areas this node carries (§6).
+             CREATE TABLE IF NOT EXISTS subscriptions (
+                 area TEXT PRIMARY KEY NOT NULL
+             ) STRICT;
+
              CREATE TABLE IF NOT EXISTS cursors (
                  peer     BLOB NOT NULL,
                  stream   BLOB NOT NULL,
@@ -357,6 +371,98 @@ impl ObjectStore {
         Ok(())
     }
 
+    /// Record a fact about this node.
+    pub fn set_state(&self, key: &str, value: &[u8]) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO node_state (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// Read a fact about this node.
+    pub fn state(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM node_state WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Subscribe to an echo area. Subscribing twice is not an error.
+    pub fn subscribe(&self, area: &str) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO subscriptions (area) VALUES (?1) ON CONFLICT DO NOTHING",
+            params![area],
+        )?;
+        Ok(())
+    }
+
+    /// Unsubscribe. Objects already held are kept: they are valid whether or not
+    /// this node still wants the area, and pruning is a separate decision (D8).
+    pub fn unsubscribe(&self, area: &str) -> Result<(), StoreError> {
+        self.conn
+            .execute("DELETE FROM subscriptions WHERE area = ?1", params![area])?;
+        Ok(())
+    }
+
+    /// Whether this node carries an area.
+    pub fn is_subscribed(&self, area: &str) -> Result<bool, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM subscriptions WHERE area = ?1",
+                params![area],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// Every subscribed area, sorted.
+    pub fn subscriptions(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT area FROM subscriptions ORDER BY area")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut areas = Vec::new();
+        for row in rows {
+            areas.push(row?);
+        }
+        Ok(areas)
+    }
+
+    /// An identity's key-management objects, in causal order.
+    ///
+    /// Key management is the root key's alone (§5.4), so ordering by sequence is
+    /// ordering by cause: a grant always precedes anything the granted key
+    /// signed.
+    ///
+    /// This is deliberately *not* every object the identity authored. Ordering
+    /// those by `(signing_key, sequence)` is lexicographic rather than causal —
+    /// when a device key happens to sort below the root key, a post replays
+    /// before the grant that authorised it, and the chain appears to contain a
+    /// key it never delegated. Authority for ordinary objects is evaluated on
+    /// read instead, against the state this chain produces.
+    ///
+    /// Root rotation (D11) will introduce a second root key and with it a real
+    /// ordering question; until then there is exactly one signer here.
+    pub fn key_chain(&self, author: IdentityId) -> Result<Vec<Object>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT tbs, signature FROM objects
+             WHERE author = ?1 AND type_code IN (1, 2, 3)
+             ORDER BY signing_key, sequence",
+        )?;
+        let rows = statement.query_map(params![author.as_bytes().as_slice()], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+        Self::collect_objects(rows)
+    }
+
     /// Every object authored by an identity, in chain order.
     ///
     /// Ordered by signing key then sequence, which is the order a key chain must
@@ -371,6 +477,13 @@ impl ObjectStore {
             Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
         })?;
 
+        Self::collect_objects(rows)
+    }
+
+    fn collect_objects<I>(rows: I) -> Result<Vec<Object>, StoreError>
+    where
+        I: Iterator<Item = rusqlite::Result<(Vec<u8>, Vec<u8>)>>,
+    {
         let mut objects = Vec::new();
         for row in rows {
             let (tbs, signature) = row?;
@@ -524,6 +637,35 @@ mod tests {
             store.journal_append(b"all", id).unwrap();
         }
         assert_eq!(store.journal_range(b"all", 3, 5).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn node_state_round_trips_and_overwrites() {
+        let store = ObjectStore::open_in_memory().unwrap();
+        assert!(store.state("identity").unwrap().is_none());
+        store.set_state("identity", b"first").unwrap();
+        store.set_state("identity", b"second").unwrap();
+        assert_eq!(
+            store.state("identity").unwrap().as_deref(),
+            Some(b"second".as_slice())
+        );
+    }
+
+    #[test]
+    fn subscriptions_are_a_set() {
+        let store = ObjectStore::open_in_memory().unwrap();
+        assert!(!store.is_subscribed("GOSUB.DEV").unwrap());
+        store.subscribe("GOSUB.DEV").unwrap();
+        store.subscribe("GOSUB.DEV").unwrap();
+        store.subscribe("TECH.RUST").unwrap();
+        assert_eq!(
+            store.subscriptions().unwrap(),
+            vec!["GOSUB.DEV", "TECH.RUST"]
+        );
+        assert!(store.is_subscribed("GOSUB.DEV").unwrap());
+
+        store.unsubscribe("GOSUB.DEV").unwrap();
+        assert_eq!(store.subscriptions().unwrap(), vec!["TECH.RUST"]);
     }
 
     #[test]
