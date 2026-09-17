@@ -12,32 +12,43 @@ finished._
 ## The shape
 
 ```text
-  M0  workspace & discipline                          S
+  M0  workspace & discipline                          S   done
    │
-  M1  identity & objects                              L
+  M1  identity & objects                              L   done
    │
-  M2  replication                                     L
-   ├──────── M3  bundles                              S   (nearly free, see below)
+  M2  replication                                     L   done
+   ├──────── M3  bundles                              S   done
    │
-  M4  public echoes                                   M
+  M4  public echoes                                   M   done
    │
-  M5  private messaging                               XL
+  M5  reachability: identity state, carriage          L
    │
-  M6  files                                           M
+  M6  private messaging                               L
    │
-  M7  identity operations                             L
+  M7  files                                           M
+   │
+  M8  identity operations & naming                    L
    │        ══════ GATE: no outside users before this ══════
    │
-  M8  communities & moderation                        L
+  M9  communities & moderation                        L
    │
-  M9  v1.0 hardening                                  M
+  M10 v1.0 hardening                                  M
 ```
 
-M3 hangs off M2 rather than following it because a bundle is the replication
-state machine driven by a file instead of a socket. Sans-io (§34.1) means the
-protocol logic does not know the difference, so once M2 works, M3 is mostly
-framing and a fuzz target. If M3 turns out to be expensive, something has gone
-wrong in M2's layering and it is worth stopping to find out what.
+M5 was inserted by the architecture's v2 revision. Private messaging was
+previously sized XL and carried a note suggesting it be split; v2 split it for
+us, by finding the missing half. A sender needs an identity's current keys and
+its carriers before it can send anything, and nothing in the design said how to
+get them. That is now M5, and M6 is the messaging proper — which drops from XL to
+L as a result.
+
+M3 hangs off M2 rather than following it, on the theory that a bundle would be
+the replication state machine driven by a file instead of a socket. Building it
+showed that half right: `Fetch` is a round trip and removable media has none, so
+a bundle is the data plane without the control plane. What did transfer was
+everything that mattered for safety — the `Replica` trait, the limits, canonical
+decoding, per-object signature checks and cursor semantics — and M3 was
+correspondingly cheap. The layering bet paid; the description of why did not.
 
 ---
 
@@ -128,7 +139,7 @@ wordlist. Passphrases come from `PIGEONNET_PASSPHRASE` rather than a prompt.
 **Why the recovery key must be here.** It has to be in the genesis object for its
 authority to be unambiguous (D11) — an identity created in M1 without one can
 never acquire one safely. The *logic* that uses it lands in M7, but the key
-material cannot wait. Getting this wrong means every identity created before M7
+material cannot wait. Getting this wrong means every identity created before M8
 is permanently unrecoverable.
 
 **Risk.** Canonical encoding is where malleability hides, and it hides quietly —
@@ -235,6 +246,32 @@ about M2 rather than about M3.
 of them, and no object circulates twice. Deliberately re-introducing a cycle in
 the peer graph does not produce a storm.
 
+**Verified 2026-09-16.** 147 tests. Three nodes converge on one nested thread and
+render it identically; a settled cycle moves nothing across five further passes in
+both directions on every edge. `nodectl echo subscribe / read`, `post` and `reply`
+work end to end, including a thread carried between two nodes on a bundle.
+
+**D6 amended.** `seen_by` and hop ceilings turned out to be unnecessary for echo
+propagation. We built *pull* (D5 journal cursors), not flooding: nobody pushes, so
+there is no storm to suppress, and content addressing deduplicates for free. They
+remain the right answer for directed forwarding of private messages (M5), which is
+a different problem that D6 had bundled in with this one.
+
+**Two bugs, both invisible until a node held someone else's data.**
+
+*Replay order.* `objects_by_author` orders by `(signing_key, sequence)`, which is
+lexicographic rather than causal — so when a device key happened to sort below the
+root key, a post replayed *before* the grant that authorised it and the chain
+appeared to contain a key it never delegated. A coin flip on randomly generated
+keys, which is why it presented as a flaky test. Key-chain replay now reads
+key-management objects only, where the single signer makes sequence order causal.
+
+*Self-identification.* `local_identity()` scanned the store for a genesis object.
+That works exactly until the first sync, after which the node holds everyone's
+genesis objects and returns whichever root key sorts first. A node's own identity
+is now recorded in a `node_state` table when it is created, because it is a fact
+about the node rather than something inferable from its contents.
+
 **Decisions exercised.** D5, D6.
 
 **Risk.** `seen_by` belongs outside the signed object; putting it inside changes
@@ -244,19 +281,80 @@ looks like a replication problem rather than a design error.
 
 ---
 
-# M5 — Private messaging
+# M5 — Reachability: identity state, carriage, node discovery
+
+**Goal.** A sender can obtain a stranger's current keys and find out where to
+send to them, without a directory, a search, or a permanent server.
+
+This milestone did not exist when the map was written. It was created by the
+architecture's v2 revision, which found that four unrelated mechanisms —
+encryption (§8.1), routing to an identity (§5.7), naming (§5.2) and inbox
+authentication (§15.4) — all needed an identity's current state and none had a
+way to obtain it. Private messaging cannot be built without it: a sender with no
+prekeys has nothing to encrypt to.
+
+**Ships**
+
+- **Identity snapshots** (D12). `current id:b3:…` returns unexpired
+  `EpochPrekey`s for every device, the latest `ReachabilityClaim`, and the
+  `IdentityProfile`. No cursor, no session state, ~14 KB for three devices.
+- The snapshot's own `valid_until`, and clients that **display its age**.
+  Freshness is a property of the snapshot, never a side effect of prekey
+  exhaustion.
+- The **chain invariant**: a node serving an object must be able to serve that
+  object's author's key chain up to the object's timestamp.
+- `resolve id:b3:…` to configured peers, **one hop, never forwarded**.
+- **`ReachabilityClaim` + `CarriageAccepted`** (D13). Both signatures required
+  before a sender routes toward a carrier; carrier-to-carrier inbox replication
+  for identities each independently accepted.
+- **Stream access classes** (D15). `echo://`, `files://` and `current` open to
+  anyone; `inbox:id:b3:X` requires a device-key signature over a nonce the
+  serving node supplies.
+- **`NodeProfile`** (D14), self-signed, relayed freely, scored locally. Opt-in;
+  leaves never publish. `peer add` stays manual. Separable from the rest of this
+  milestone and the first thing to cut if it runs long.
+
+**Exit.** A node that has never heard of an identity resolves it from a peer,
+obtains usable prekeys, and learns which carriers accept for it — with the
+`CarriageAccepted` counter-signature verified, not assumed. A cached snapshot
+served by a third party verifies identically to one from the origin. An
+unauthenticated `inbox:` query is refused; an authenticated one succeeds.
+
+**Decisions exercised.** D12, D13, D14, D15.
+
+**Risk.** Two sit in the architecture rather than the code. **`resolve` must
+never be forwarded** — one hop makes it a cache lookup against peers already
+chosen, forwarding makes it a DHT that learns who asks about whom. And the
+snapshot is world-readable by necessity: device count, carriers, and a liveness
+signal are visible to anyone who asks, because letting strangers encrypt to you
+means letting strangers read your keys. Neither has a fix; both need stating
+rather than solving.
+
+Section 37.4 is the one worth watching: a carrier sees an identity's complete
+correspondence metadata for its whole catchment, and D13 recommends *two*.
+
+---
+
+# M6 — Private messaging
 
 **Goal.** An encrypted message crosses at least one untrusted relay, is readable
 on two of the recipient's devices, and becomes unreadable on schedule.
 
-The largest milestone. Consider splitting it in two — crypto first, then
-delivery — if it stalls.
+**Depends on M5.** Prekeys come from a snapshot (D12) and delivery goes to a
+carrier (D13); neither existed when this milestone was first written, which is
+why it was sized XL and flagged for splitting.
 
 **Ships**
 
 - Per-device epoch prekeys, signed by a device key holding `publish-prekeys`
-  (§8.1). The root key stays cold.
-- Prekey publication schedule, several epochs ahead.
+  (§8.1). The root key stays cold. Published into the snapshot of M5, which is
+  how a sender obtains them.
+- Prekey publication schedule, with lookahead — **an open question, not a
+  parameter** (§37.1). Lookahead is the main control on the compromise window: a
+  leaked backup with a year of it becomes a standing wiretap on the future rather
+  than a window into the past, which contradicts D9's claim that an old leak
+  opens only its own epoch. Four candidate designs are recorded; none adopted.
+- Inbox spooling at a carrier, and the authenticated `inbox:` query (D15).
 - Sender **fan-out**: payload encrypted once under a content key, wrapped per
   recipient device.
 - HKDF-SHA256 and ChaCha20-Poly1305, with the canonical header as associated data.
@@ -279,15 +377,15 @@ unreadable, verified by test rather than by assertion.
 
 **Risk.** Key destruction scheduling cuts both ways: too eager and messages are
 lost permanently and silently, too lazy and forward secrecy is nominal. **`W`'s
-default of 30 days is an assumption, not a measured number** — this milestone is
-where it gets validated against real sync intervals, and it should be treated as
-an open question until then. The second risk is that fan-out makes it tempting to
+default of 30 days is an assumption, not a measured number**, and §37.1 has since
+reopened epoch length and lookahead as a genuine design question rather than a
+tuning one. Both get settled here or they get settled by an incident. The second risk is that fan-out makes it tempting to
 share one prekey across devices to save bytes; that reintroduces the
 secret-syncing problem D4 rejected.
 
 ---
 
-# M6 — Files
+# M7 — Files
 
 **Goal.** A file published on one node is fetched and verified from another,
 resumably, without trusting the source.
@@ -312,7 +410,7 @@ provides.
 
 ---
 
-# M7 — Identity operations
+# M8 — Identity operations and naming
 
 **Goal.** Keys can be rotated, devices revoked, and a stolen identity reclaimed.
 
@@ -326,7 +424,13 @@ provides.
   voidable, contact-attested per-observer — plus `SuccessionRevoked`.
 - Signed introductions and the depth-1 trust graph (§13.1, D7).
 - Invitation tokens (§14.3).
-- `nodectl device grant` / `device revoke` / `identity recover`.
+- **Human-readable names** (§5.2): `NameClaim` + `NameGranted`, both signatures
+  required so neither a directory nor an identity can bind alone, and resolution
+  **pinned on first use** — a later rebinding stops and asks rather than silently
+  substituting someone. A directory is an ordinary identity added by hand, with
+  no special status.
+- `nodectl device grant` / `device revoke` / `identity recover` /
+  `directory add`.
 
 **Exit.** A simulated theft is reversed: the thief rotates the root and grants
 themselves a device, the owner publishes one recovery-signed `RootKeyReplaced`
@@ -346,18 +450,18 @@ identity forks — which §5.5 argues is worse than losing it.
 
 ---
 
-## Gate: no outside users before M7
+## Gate: no outside users before M8
 
-Until M7 ships, an identity is one disk failure from death and one stolen key
+Until M8 ships, an identity is one disk failure from death and one stolen key
 from permanent hijack. Anyone creating an identity they care about before then is
 being set up to lose it.
 
 Run the network with throwaway identities and say so plainly. Do not let this
-gate slide because M5 produced a demo that felt finished.
+gate slide because M6 produced a demo that felt finished.
 
 ---
 
-# M8 — Communities & moderation
+# M9 — Communities & moderation
 
 **Goal.** A community with roles, membership, and moderation that nodes may
 choose to honour.
@@ -380,7 +484,7 @@ Ship membership, roles, and hiding; defer everything else until asked for twice.
 
 ---
 
-# M9 — v1.0 hardening
+# M10 — v1.0 hardening
 
 **Goal.** Something a stranger can run.
 
@@ -410,8 +514,11 @@ Each was considered and deferred with reasons recorded in the architecture:
 | Per-contact ratchet | D4 — defends a gap already closed from both sides |
 | Group and community encryption (MLS) | D4 — no bespoke group scheme |
 | Onion routing, sealed metadata | §8.4 |
-| Distributed peer discovery, DHT | D6 |
+| Distributed peer discovery, DHT | D6, D14 — self-signed profiles instead |
 | `k`-of-`n` social recovery | D11 — quorum collusion, delegate rot |
+| Forwarded `resolve` queries | D12 — forwarding builds a DHT that learns who asks about whom |
+| Replicated peer quality scores | D14 — a global consensus artifact, and observer-relative anyway |
+| Any people search or enumeration | D12 — resolution is by exact identity only, permanently |
 | Postage tokens, global reputation | D7 — both need network-wide agreement |
 | Snapshots, archival-peer discovery | D8 |
 | SMTP and NNTP bridges | §2 — must not shape the core protocol |
@@ -420,9 +527,39 @@ Each was considered and deferred with reasons recorded in the architecture:
 
 ## Open questions, and where they close
 
+Architecture §37 now carries the design-level open questions, with reasoning.
+This table is only the build-order view of them.
+
 | Question | Closes at |
 |---|---|
-| `W` default — 30 days is assumed, not measured | M5, against real sync intervals |
+| Epoch length and lookahead versus backup exposure (§37.1) | M6 — the largest open question in the design |
+| `W` default — 30 days is assumed, not measured | M6, against real sync intervals |
+| Public echo abuse, now also for `NodeProfile` objects (§37.2) | unresolved; blunted in M5, not solved |
+| Cold identity resolution when no path reaches it (§37.3) | M5 — likely documented as a limit rather than fixed |
+| Metadata concentration at carriers (§37.4) | M5 — needs plain statement in user-facing docs |
+| Per-key sequence gaplessness under partial replication (§37.5) | M6 — see the note below |
+| Whether contact-attested succession needs a depth rule | M8, if attestation proves noisy |
 | Document title is generic; the project is Pigeonnet | any time; cosmetic |
-| Whether M5 should split into crypto and delivery | decide when M5 is scoped |
-| Whether contact-attested succession needs a depth rule | M7, if attestation proves noisy |
+
+**On §37.5.** §3.3 still requires `sequence` to be gapless per signing key, and
+under partial replication a node sees only the fraction of a key's output that
+landed in streams it carries, so gaps are normal and carry no information. The
+build is currently on the safe side of this by accident: after M4, key-chain
+replay reads *only* key-management objects, which are root-signed and arrive
+whole via the chain invariant, so gaplessness genuinely holds there. Sequence
+checking for ordinary objects was never implemented. The contradiction is open in
+the document, not silently violated in the code — but the first code that checks
+an `EchoPost`'s sequence will have to pick a side.
+
+---
+
+## Work the v2 revision created in already-finished milestones
+
+Neither is urgent; both are wrong-mechanism rather than broken.
+
+- **`StreamId::Identity` is superseded by D12.** `pigeonnet-proto` has the
+  variant and `Replication::journal` writes key-management objects into it. D12
+  replaces the dedicated stream with the chain invariant plus `current`
+  snapshots. Remove it in M5, when the replacement exists.
+- **`PeerAnnouncement` is gone from §24**, replaced by `NodeProfile` (D14). Never
+  implemented, so this is a vocabulary correction only.
