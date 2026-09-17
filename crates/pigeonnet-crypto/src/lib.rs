@@ -14,11 +14,13 @@
 )]
 
 pub mod error;
+pub mod identity;
 pub mod keys;
 pub mod keystore;
 pub mod sign;
 
 pub use error::CryptoError;
+pub use identity::{IdentityError, IdentityState};
 pub use keys::{AgreementKeypair, SigningKeypair, verify};
 pub use keystore::Keyring;
 pub use sign::{sign_object, verify_object};
