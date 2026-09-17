@@ -11,8 +11,10 @@
     allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)
 )]
 
+pub mod echo;
 pub mod replication;
 
+pub use echo::ThreadedPost;
 pub use replication::Replication;
 
 use std::{
@@ -114,6 +116,9 @@ impl core::fmt::Debug for CreatedIdentity {
             .finish_non_exhaustive()
     }
 }
+
+/// Key under which a node records which identity is its own.
+pub(crate) const LOCAL_IDENTITY: &str = "identity";
 
 /// A node's on-disk state.
 #[derive(Debug)]
@@ -259,6 +264,8 @@ impl Node {
                 .map_err(|_| NodeError::Object(pigeonnet_core::Error::NonCanonical))?;
         }
 
+        self.store.set_state(LOCAL_IDENTITY, identity.as_bytes())?;
+
         Ok(CreatedIdentity {
             identity,
             genesis: genesis.id(),
@@ -353,7 +360,10 @@ impl Node {
             .get(identity.genesis_object())?
             .ok_or(NodeError::NotInitialised)?;
         let mut state = IdentityState::from_genesis(&genesis)?;
-        for object in self.store.objects_by_author(identity)? {
+        // Key management only, in causal order. Replaying every object the
+        // identity authored would mean replaying them in lexicographic key
+        // order, where a post can precede the grant that authorised it.
+        for object in self.store.key_chain(identity)? {
             state.admit(&object)?;
         }
         Ok(state)

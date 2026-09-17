@@ -3,7 +3,7 @@
 //! The clock is injected rather than read, so a session's behaviour is
 //! reproducible in a test.
 
-use pigeonnet_core::{NodeId, Object, ObjectId, ObjectType, cbor};
+use pigeonnet_core::{NodeId, Object, ObjectId, ObjectType, cbor, payload::Payload as _};
 use pigeonnet_proto::{AcceptError, JournalEntry, Replica, ReplicaError, StreamId};
 
 use crate::Node;
@@ -142,6 +142,16 @@ impl Replication<'_> {
                 | ObjectType::DeviceKeyGranted
                 | ObjectType::DeviceKeyRevoked)
         );
+        if tbs.object_type() == Ok(ObjectType::EchoPost) {
+            // Journalled into its area whether or not this node subscribes:
+            // holding an object and wanting its area are separate questions, and
+            // a subscription governs what we *ask* for (see `Node::sync_plan`).
+            let post =
+                pigeonnet_core::payload::EchoPost::decode_payload(&tbs.payload).map_err(local)?;
+            let key = stream_key(&StreamId::Echo(post.area))?;
+            store.journal_append(&key, id).map_err(local)?;
+        }
+
         if is_key_management {
             // A genesis object names no author: the identity it belongs to is
             // the one it creates.
