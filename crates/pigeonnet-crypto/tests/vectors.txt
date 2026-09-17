@@ -1,0 +1,41 @@
+# Pigeonnet canonical object test vectors, format v1.
+# Generated from fixed seeds; see tests/vectors.rs.
+# A change here is a change to the wire format.
+
+[keys]
+root      = ed25519:rkeohxlubhyzl7ks3mwtzos5olfgocn7dwkbeg7toseadnapn5oa
+recovery  = ed25519:qe4xodvipulv6vvdkrtmgtd6ztfy3curwtxdpis56yhvxd6jwoka
+agreement = x25519:lx7n2o3l2r7w7iuo4foznhk3wdvfg52njcf5v6o7drxacjft54ra
+device    = ed25519:zkj2yfyfdbyhdvt3qpd76dx6qeeor3cfgblv25zgq6jthw62xz6a
+
+[identity]
+id = id:b3:dur73ivqnbugvwserhpsygnljwjpiydlrfqnoosujljshgdg6mma
+
+[genesis]
+type_code = 1
+sequence  = 0
+tbs       = a70001010102582000000000000000000000000000000000000000000000000000000000000000000358208a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c041b000001a0a9a8b100050006586aa30058208a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c0158208139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b3940258205dfedd3b6bd47f6fa28ee15d969d5bb0ea53774d488bdaf9df1c6e0124b3ef22
+id        = obj:b3:dur73ivqnbugvwserhpsygnljwjpiydlrfqnoosujljshgdg6mma
+signature = sig:4bmennuhb52w5hir4j3ebr3m7yj5mwwffvblehfeybfh54dilq5qi7uomjycjvohvgfdbd5pq5qvvhq7pmg7oxqljrfqct3n5bwuady
+
+[device_key_granted]
+type_code = 2
+sequence  = 1
+tbs       = a7000101020258201d23fda2b068686ada4489df2c19ab4d92f4606b8960d73a544ad3239866f3180358208a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c041b000001a0a9a8b4e80501065830a3005820ca93ac1705187071d67b83c7ff0efe8108e8ec4530575d7726879333dbdabe7c010b021b000001a0a9a8b4e8
+id        = obj:b3:xrmhrklhji6esixmdf5pzkawlrciwlfqtxlfgwi5z4f62qsx5ixa
+signature = sig:c3t7f3cp4ayhdbrssfw5vsxxxkuhquhtacdg6dsd76576rfxk6w4enfrlygxzasmys5lzi5x4ooqauoatmwxb4qv3ijnylsuvirqqbq
+
+[device_key_granted_bounded]
+type_code = 2
+sequence  = 2
+tbs       = a7000101020258201d23fda2b068686ada4489df2c19ab4d92f4606b8960d73a544ad3239866f3180358208a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c041b000001a0a9a8b8d0050206583aa4005820ca93ac1705187071d67b83c7ff0efe8108e8ec4530575d7726879333dbdabe7c0101021b000001a0a9a8b8d0031b000001a0a9b7ef58
+id        = obj:b3:vuxgkolibhpog5owjtm6tuf4kcp5rg3viugwgys7amqlwsobahdq
+signature = sig:h7tp2li3mahx6la7nk67p2gmz26zogbajf2q6bvhhnhuzfhnl5mimsc3nxok6e5yoq3dftiggngi45x3orgawjie5c6e6ol3az5wobi
+
+[device_key_revoked]
+type_code = 3
+sequence  = 3
+tbs       = a7000101030258201d23fda2b068686ada4489df2c19ab4d92f4606b8960d73a544ad3239866f3180358208a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c041b000001a0a9a8bcb80503065838a3005820ca93ac1705187071d67b83c7ff0efe8108e8ec4530575d7726879333dbdabe7c011b000001a0a9a8bcb8021b000001a0a9a8b6dc
+id        = obj:b3:uqme3nrui2lai7uvfylhcs7yerli7u2aldraqb7o77k3cngalkxa
+signature = sig:wxfmeooax2x4rv2x3elbyct7l4ux33nwvobvy3mvhmcjd2ponsf6wrma7lgfoydjwkazbsxqt3sy34mevxrohtwab7s2vwjzebwpscq
+
