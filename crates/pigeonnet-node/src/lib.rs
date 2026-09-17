@@ -8,6 +8,10 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod replication;
+
+pub use replication::Replication;
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -106,6 +110,7 @@ impl core::fmt::Debug for CreatedIdentity {
 pub struct Node {
     root: PathBuf,
     store: ObjectStore,
+    limits: pigeonnet_proto::Limits,
 }
 
 impl Node {
@@ -116,6 +121,7 @@ impl Node {
         Ok(Self {
             root: root.to_path_buf(),
             store,
+            limits: pigeonnet_proto::Limits::DEFAULT,
         })
     }
 
@@ -123,6 +129,23 @@ impl Node {
     #[must_use]
     pub const fn store(&self) -> &ObjectStore {
         &self.store
+    }
+
+    /// This node's resource limits (§30.1).
+    #[must_use]
+    pub const fn limits(&self) -> &pigeonnet_proto::Limits {
+        &self.limits
+    }
+
+    /// Set this node's resource limits.
+    pub const fn set_limits(&mut self, limits: pigeonnet_proto::Limits) {
+        self.limits = limits;
+    }
+
+    /// A replication view of this node, with the clock supplied by the caller.
+    #[must_use]
+    pub const fn replication(&self, now: i64) -> Replication<'_> {
+        Replication::new(self, now)
     }
 
     fn keystore_path(&self) -> PathBuf {
@@ -213,8 +236,18 @@ impl Node {
         let sealed = keyring.seal(passphrase)?;
         write_private(&self.keystore_path(), &sealed)?;
 
-        self.store.put(&genesis, now)?;
-        self.store.put(&grant, now)?;
+        {
+            use pigeonnet_proto::Replica as _;
+            let mut replication = self.replication(now);
+            let genesis_bytes = genesis.to_canonical_bytes()?;
+            let grant_bytes = grant.to_canonical_bytes()?;
+            replication
+                .accept(&genesis_bytes)
+                .map_err(|_| NodeError::Object(pigeonnet_core::Error::NonCanonical))?;
+            replication
+                .accept(&grant_bytes)
+                .map_err(|_| NodeError::Object(pigeonnet_core::Error::NonCanonical))?;
+        }
 
         Ok(CreatedIdentity {
             identity,
