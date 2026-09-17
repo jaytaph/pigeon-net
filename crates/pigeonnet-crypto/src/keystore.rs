@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 use crate::{AgreementKeypair, CryptoError, SigningKeypair};
 
 const MAGIC: &[u8; 8] = b"PGNKEY\0\0";
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
 const HEADER_LEN: usize = MAGIC.len() + 1 + SALT_LEN + NONCE_LEN;
@@ -59,9 +59,23 @@ pub struct Keyring {
     #[cbor(n(1), with = "minicbor::bytes")]
     device_seed: [u8; 32],
 
-    /// The long-term X25519 secret (§8.1).
+    /// The long-term X25519 secret, used only for the `fs: none` fallback
+    /// (§8.1).
     #[cbor(n(2), with = "minicbor::bytes")]
     agreement_secret: [u8; 32],
+
+    /// The ratcheting seed every epoch prekey secret derives from (§8.1).
+    ///
+    /// One value rather than one secret per epoch, so that destroying an epoch
+    /// is a ratchet step rather than a file deletion the storage layer may
+    /// quietly decline to perform.
+    #[cbor(n(3), with = "minicbor::bytes")]
+    prekey_seed: [u8; 32],
+
+    /// The earliest epoch `prekey_seed` can still produce. Everything before it
+    /// has been ratcheted away.
+    #[n(4)]
+    prekey_epoch: u64,
 }
 
 impl Keyring {
@@ -71,11 +85,14 @@ impl Keyring {
         root: &SigningKeypair,
         device: &SigningKeypair,
         agreement: &AgreementKeypair,
+        prekeys: &crate::PrekeySeed,
     ) -> Self {
         Self {
             root_seed: *root.seed(),
             device_seed: *device.seed(),
             agreement_secret: *agreement.secret(),
+            prekey_seed: *prekeys.seed(),
+            prekey_epoch: prekeys.epoch(),
         }
     }
 
@@ -91,10 +108,25 @@ impl Keyring {
         SigningKeypair::from_seed(&self.device_seed)
     }
 
-    /// The agreement key.
+    /// The long-term agreement key.
     #[must_use]
     pub fn agreement(&self) -> AgreementKeypair {
         AgreementKeypair::from_secret(&self.agreement_secret)
+    }
+
+    /// The epoch prekey seed.
+    #[must_use]
+    pub fn prekeys(&self) -> crate::PrekeySeed {
+        crate::PrekeySeed::from_parts(self.prekey_seed, self.prekey_epoch)
+    }
+
+    /// Replace the prekey seed, after ratcheting it forward.
+    ///
+    /// The caller re-seals the keystore; until it does, the destroyed epochs are
+    /// only destroyed in memory.
+    pub fn set_prekeys(&mut self, prekeys: &crate::PrekeySeed) {
+        self.prekey_seed = *prekeys.seed();
+        self.prekey_epoch = prekeys.epoch();
     }
 
     /// Seal under a passphrase.
@@ -176,6 +208,7 @@ impl core::fmt::Debug for Keyring {
             .field("root", &self.root().public())
             .field("device", &self.device().public())
             .field("agreement", &self.agreement().public())
+            .field("prekey_epoch", &self.prekey_epoch)
             .finish()
     }
 }
@@ -186,6 +219,7 @@ impl Drop for Keyring {
         self.root_seed.zeroize();
         self.device_seed.zeroize();
         self.agreement_secret.zeroize();
+        self.prekey_seed.zeroize();
     }
 }
 
@@ -210,6 +244,7 @@ mod tests {
             &SigningKeypair::generate().unwrap(),
             &SigningKeypair::generate().unwrap(),
             &AgreementKeypair::generate().unwrap(),
+            &crate::PrekeySeed::generate(100).unwrap(),
         )
     }
 
@@ -220,6 +255,16 @@ mod tests {
         let sealed = original.seal(b"correct horse").unwrap();
         let opened = Keyring::open(&sealed, b"correct horse").unwrap();
         assert_eq!(opened.root().public(), root);
+    }
+
+    #[test]
+    fn the_prekey_seed_survives_a_round_trip() {
+        let original = keyring();
+        let public = original.prekeys().public(105).unwrap();
+        let sealed = original.seal(b"p").unwrap();
+        let opened = Keyring::open(&sealed, b"p").unwrap();
+        assert_eq!(opened.prekeys().public(105).unwrap(), public);
+        assert_eq!(opened.prekeys().epoch(), 100);
     }
 
     #[test]

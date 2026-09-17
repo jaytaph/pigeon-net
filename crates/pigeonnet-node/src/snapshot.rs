@@ -151,6 +151,7 @@ impl Node {
             })
             .collect();
 
+        let seed = self.keyring(passphrase)?.prekeys();
         let first = Self::epoch_at(now);
         let mut published = Vec::new();
         for epoch in first..first.saturating_add(lookahead.max(1)) {
@@ -161,13 +162,12 @@ impl Node {
                 .cast_signed()
                 .saturating_add(1)
                 .saturating_mul(EPOCH_MILLIS);
-            let agreement = pigeonnet_crypto::AgreementKeypair::generate()?;
-            // NOTE: the private half is discarded here. Persisting per-epoch
-            // secrets is M6's problem, together with destroying them on
-            // schedule -- which is the entire forward-secrecy mechanism.
+            // Derived from the ratcheting seed, not generated and discarded:
+            // the secret is recoverable for as long as the seed has not been
+            // advanced past this epoch, and unrecoverable the moment it has.
             let payload = EpochPrekey {
                 epoch,
-                public_key: agreement.public(),
+                public_key: seed.public(epoch)?,
                 valid_until: Timestamp::from_millis(epoch_end.saturating_add(RETENTION_MILLIS)),
             }
             .encode_payload()?;
@@ -252,5 +252,47 @@ impl Node {
             passphrase,
             now,
         )
+    }
+}
+
+impl Node {
+    /// Destroy every epoch secret before `epoch`.
+    ///
+    /// Irreversible, and that is the point: this is the operation forward
+    /// secrecy is made of (D4). Messages sealed to a destroyed epoch become
+    /// unreadable by anyone, including this node and the sender.
+    ///
+    /// Returns how many epochs were destroyed.
+    pub fn destroy_prekeys_before(&self, epoch: u64, passphrase: &[u8]) -> Result<u64, NodeError> {
+        let mut keyring = self.keyring(passphrase)?;
+        let mut prekeys = keyring.prekeys();
+        let destroyed = prekeys.ratchet_to(epoch)?;
+        if destroyed == 0 {
+            return Ok(0);
+        }
+        keyring.set_prekeys(&prekeys);
+
+        // Until this is written the destruction exists only in memory, which is
+        // no destruction at all.
+        let sealed = keyring.seal(passphrase)?;
+        crate::write_private(&self.keystore_path(), &sealed)?;
+        Ok(destroyed)
+    }
+
+    /// Destroy every epoch whose retention window has closed.
+    ///
+    /// An epoch `E` is readable until `epoch_end(E) + W` (§8.1). Past that, the
+    /// secret is of no use to its owner and of considerable use to anyone who
+    /// later obtains the keystore, so it goes.
+    ///
+    /// Meant to run on a schedule. A node that never calls this keeps every
+    /// secret it has ever held, and its forward secrecy is a claim rather than a
+    /// property.
+    pub fn destroy_expired_prekeys(&self, passphrase: &[u8], now: i64) -> Result<u64, NodeError> {
+        let cutoff = now.saturating_sub(RETENTION_MILLIS);
+        if cutoff <= 0 {
+            return Ok(0);
+        }
+        self.destroy_prekeys_before(cutoff.div_euclid(EPOCH_MILLIS).cast_unsigned(), passphrase)
     }
 }

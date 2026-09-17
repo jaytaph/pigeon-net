@@ -115,6 +115,25 @@ impl AgreementKeypair {
     pub fn public(&self) -> AgreementKeyBytes {
         AgreementKeyBytes::from_bytes(*x25519_dalek::PublicKey::from(&self.0).as_bytes())
     }
+
+    /// Diffie-Hellman against someone else's public half.
+    ///
+    /// The raw shared point, which is **not** a key. It goes through a KDF
+    /// before anything encrypts with it: X25519 outputs are not uniformly
+    /// distributed, and using one directly as an AEAD key is a classic way to
+    /// lose the security proof.
+    ///
+    /// A contributory-behaviour check is deliberately absent. An all-zero result
+    /// means the peer supplied a small-order point, and the KDF binds the
+    /// ephemeral key and both identities, so a forced-zero shared secret yields a
+    /// key the attacker still cannot predict for any *other* pair. It is worth
+    /// revisiting if this is ever used for authenticated key exchange, which it
+    /// is not — authorship comes from the signature (D4).
+    #[must_use]
+    pub fn agree(&self, their_public: AgreementKeyBytes) -> Zeroizing<[u8; 32]> {
+        let their_public = x25519_dalek::PublicKey::from(*their_public.as_bytes());
+        Zeroizing::new(self.0.diffie_hellman(&their_public).to_bytes())
+    }
 }
 
 impl core::fmt::Debug for AgreementKeypair {
@@ -172,6 +191,21 @@ mod tests {
         let seed_hex: String = seed.iter().map(|b| format!("{b:02x}")).collect();
         assert!(!rendered.contains(&seed_hex));
         assert!(rendered.contains("ed25519:"));
+    }
+
+    #[test]
+    fn agreement_is_symmetric() {
+        let a = AgreementKeypair::generate().unwrap();
+        let b = AgreementKeypair::generate().unwrap();
+        assert_eq!(a.agree(b.public()), b.agree(a.public()));
+    }
+
+    #[test]
+    fn different_pairs_agree_differently() {
+        let a = AgreementKeypair::generate().unwrap();
+        let b = AgreementKeypair::generate().unwrap();
+        let c = AgreementKeypair::generate().unwrap();
+        assert_ne!(a.agree(b.public()), a.agree(c.public()));
     }
 
     #[test]

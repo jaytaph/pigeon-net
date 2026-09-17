@@ -57,6 +57,10 @@ pub enum NodeError {
     AlreadyInitialised,
     /// This node holds no identity yet.
     NotInitialised,
+    /// Nothing is known about that identity — resolve or sync first (D12).
+    UnknownIdentity(IdentityId),
+    /// A snapshot did not verify.
+    Snapshot(pigeonnet_crypto::SnapshotError),
     /// A bundle could not be read or written.
     Bundle(BundleError),
 }
@@ -75,6 +79,7 @@ from_error! {
     IdentityError => Identity,
     pigeonnet_core::Error => Object,
     BundleError => Bundle,
+    pigeonnet_crypto::SnapshotError => Snapshot,
 }
 
 impl core::fmt::Display for NodeError {
@@ -88,6 +93,10 @@ impl core::fmt::Display for NodeError {
             Self::AlreadyInitialised => f.write_str("this node already holds an identity"),
             Self::NotInitialised => f.write_str("no identity yet -- run `nodectl identity create`"),
             Self::Bundle(e) => write!(f, "{e}"),
+            Self::UnknownIdentity(id) => {
+                write!(f, "nothing known about {id} -- resolve or sync first")
+            }
+            Self::Snapshot(e) => write!(f, "{e}"),
         }
     }
 }
@@ -166,7 +175,7 @@ impl Node {
         Replication::new(self, now)
     }
 
-    fn keystore_path(&self) -> PathBuf {
+    pub(crate) fn keystore_path(&self) -> PathBuf {
         self.root.join("keys.bin")
     }
 
@@ -250,7 +259,11 @@ impl Node {
         let mut state = IdentityState::from_genesis(&genesis)?;
         state.admit(&grant)?;
 
-        let keyring = Keyring::new(&root_key, &device_key, &agreement_key);
+        // Anchored at the current epoch: everything before it is unreachable
+        // from this seed by construction, so an identity created today cannot
+        // produce a prekey for last week even if asked.
+        let prekeys = pigeonnet_crypto::PrekeySeed::generate(Self::epoch_at(now))?;
+        let keyring = Keyring::new(&root_key, &device_key, &agreement_key, &prekeys);
         let sealed = keyring.seal(passphrase)?;
         write_private(&self.keystore_path(), &sealed)?;
 
@@ -420,7 +433,7 @@ impl Node {
 }
 
 /// Write a file that only its owner may read.
-fn write_private(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
     fs::write(path, bytes)?;
     #[cfg(unix)]
     {
