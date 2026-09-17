@@ -1,8 +1,325 @@
-//! SQLite-backed object store, journals and derived indexes.
+//! SQLite-backed object store.
 //!
 //! The store preserves the original canonical bytes of every object (D2, §25).
-//! Derived indexes are rebuilt from those bytes, never from a re-serialization.
+//! Everything else in the schema is a derived index: it exists to make lookups
+//! fast, and can be dropped and rebuilt from the stored bytes without loss.
 //!
-//! Synchronous by design — see §34.1.
+//! Synchronous by design (§34.1). No async reaches this crate.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
+use std::path::Path;
+
+use pigeonnet_core::{IdentityId, Object, ObjectId, PublicKeyBytes, SignatureBytes};
+use rusqlite::{Connection, OptionalExtension, params};
+
+/// Schema version, bumped whenever the derived tables change shape.
+///
+/// A mismatch is not a migration problem: the derived tables can always be
+/// rebuilt from the `objects` table's canonical bytes.
+const SCHEMA_VERSION: i64 = 1;
+
+/// Storage errors.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum StoreError {
+    /// The database rejected an operation.
+    Database(rusqlite::Error),
+    /// Stored bytes did not decode — corruption, or a downgrade.
+    Corrupt(pigeonnet_core::Error),
+    /// The database was written by a newer build.
+    SchemaTooNew(i64),
+}
+
+impl core::fmt::Display for StoreError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Database(e) => write!(f, "database: {e}"),
+            Self::Corrupt(e) => write!(f, "stored object did not decode: {e}"),
+            Self::SchemaTooNew(v) => {
+                write!(f, "database schema version {v} is newer than this build")
+            }
+        }
+    }
+}
+
+impl core::error::Error for StoreError {}
+
+impl From<rusqlite::Error> for StoreError {
+    fn from(e: rusqlite::Error) -> Self {
+        Self::Database(e)
+    }
+}
+
+impl From<pigeonnet_core::Error> for StoreError {
+    fn from(e: pigeonnet_core::Error) -> Self {
+        Self::Corrupt(e)
+    }
+}
+
+/// An object store.
+#[derive(Debug)]
+pub struct ObjectStore {
+    conn: Connection,
+}
+
+impl ObjectStore {
+    /// Open or create a store on disk.
+    pub fn open(path: &Path) -> Result<Self, StoreError> {
+        Self::from_connection(Connection::open(path)?)
+    }
+
+    /// Open a transient store, for tests.
+    pub fn open_in_memory() -> Result<Self, StoreError> {
+        Self::from_connection(Connection::open_in_memory()?)
+    }
+
+    fn from_connection(conn: Connection) -> Result<Self, StoreError> {
+        // WAL: readers do not block the writer, which matters when a sync is
+        // running while the CLI is reading.
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+
+        let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version > SCHEMA_VERSION {
+            return Err(StoreError::SchemaTooNew(version));
+        }
+
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS objects (
+                 id          BLOB PRIMARY KEY NOT NULL,
+                 tbs         BLOB NOT NULL,
+                 signature   BLOB NOT NULL,
+                 type_code   INTEGER NOT NULL,
+                 author      BLOB NOT NULL,
+                 signing_key BLOB NOT NULL,
+                 timestamp   INTEGER NOT NULL,
+                 sequence    INTEGER NOT NULL,
+                 received_at INTEGER NOT NULL
+             ) STRICT;
+             CREATE INDEX IF NOT EXISTS objects_by_author
+                 ON objects (author, signing_key, sequence);
+             CREATE INDEX IF NOT EXISTS objects_by_type
+                 ON objects (type_code, timestamp);",
+        )?;
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+
+        Ok(Self { conn })
+    }
+
+    /// Store an object. Storing one twice is not an error: objects are immutable
+    /// and content-addressed, so a second copy is the same copy.
+    pub fn put(&self, object: &Object, received_at: i64) -> Result<ObjectId, StoreError> {
+        let id = object.id();
+        let tbs = object.tbs()?;
+        self.conn.execute(
+            "INSERT INTO objects
+                 (id, tbs, signature, type_code, author, signing_key, timestamp, sequence, received_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT (id) DO NOTHING",
+            params![
+                id.as_bytes().as_slice(),
+                object.tbs_bytes(),
+                object.signature().as_bytes().as_slice(),
+                i64::from(tbs.type_code),
+                tbs.author.as_bytes().as_slice(),
+                tbs.signing_key.as_bytes().as_slice(),
+                tbs.timestamp.as_millis(),
+                // SQLite integers are signed; sequences beyond i64::MAX are not
+                // reachable in any real history, but reinterpret rather than
+                // truncate so the round trip stays exact.
+                tbs.sequence.cast_signed(),
+                received_at,
+            ],
+        )?;
+        Ok(id)
+    }
+
+    /// Retrieve an object by identifier.
+    pub fn get(&self, id: ObjectId) -> Result<Option<Object>, StoreError> {
+        let row: Option<(Vec<u8>, Vec<u8>)> = self
+            .conn
+            .query_row(
+                "SELECT tbs, signature FROM objects WHERE id = ?1",
+                params![id.as_bytes().as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+
+        let Some((tbs, signature)) = row else {
+            return Ok(None);
+        };
+        let signature: [u8; 64] = signature.as_slice().try_into().map_err(|_| {
+            StoreError::Corrupt(pigeonnet_core::Error::BadLength {
+                field: "signature",
+                expected: 64,
+                actual: signature.len(),
+            })
+        })?;
+        Ok(Some(Object::from_parts(
+            tbs,
+            SignatureBytes::from_bytes(signature),
+        )))
+    }
+
+    /// Whether an object is held.
+    pub fn contains(&self, id: ObjectId) -> Result<bool, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM objects WHERE id = ?1",
+                params![id.as_bytes().as_slice()],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// How many objects are held.
+    pub fn len(&self) -> Result<u64, StoreError> {
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0))?;
+        Ok(n.cast_unsigned())
+    }
+
+    /// Whether the store is empty.
+    pub fn is_empty(&self) -> Result<bool, StoreError> {
+        Ok(self.len()? == 0)
+    }
+
+    /// The highest sequence number seen from a signing key, if any.
+    pub fn highest_sequence(
+        &self,
+        author: IdentityId,
+        signing_key: PublicKeyBytes,
+    ) -> Result<Option<u64>, StoreError> {
+        let value: Option<i64> = self.conn.query_row(
+            "SELECT MAX(sequence) FROM objects WHERE author = ?1 AND signing_key = ?2",
+            params![
+                author.as_bytes().as_slice(),
+                signing_key.as_bytes().as_slice()
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(value.map(i64::cast_unsigned))
+    }
+
+    /// Every object authored by an identity, in chain order.
+    ///
+    /// Ordered by signing key then sequence, which is the order a key chain must
+    /// be replayed in (D3).
+    pub fn objects_by_author(&self, author: IdentityId) -> Result<Vec<Object>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT tbs, signature FROM objects
+             WHERE author = ?1
+             ORDER BY signing_key, sequence",
+        )?;
+        let rows = statement.query_map(params![author.as_bytes().as_slice()], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+
+        let mut objects = Vec::new();
+        for row in rows {
+            let (tbs, signature) = row?;
+            let signature: [u8; 64] = signature.as_slice().try_into().map_err(|_| {
+                StoreError::Corrupt(pigeonnet_core::Error::BadLength {
+                    field: "signature",
+                    expected: 64,
+                    actual: signature.len(),
+                })
+            })?;
+            objects.push(Object::from_parts(
+                tbs,
+                SignatureBytes::from_bytes(signature),
+            ));
+        }
+        Ok(objects)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pigeonnet_core::{ObjectType, Tbs, Timestamp};
+
+    use super::*;
+
+    fn object(sequence: u64, payload: &[u8]) -> Object {
+        let tbs = Tbs {
+            version: pigeonnet_core::OBJECT_VERSION,
+            type_code: ObjectType::IdentityCreated.code(),
+            author: IdentityId::from_bytes([9; 32]),
+            signing_key: PublicKeyBytes::from_bytes([4; 32]),
+            timestamp: Timestamp::from_millis(1_758_000_000_000),
+            sequence,
+            payload: payload.to_vec(),
+        };
+        Object::from_parts(tbs.to_canonical_bytes().unwrap(), SignatureBytes::ZERO)
+    }
+
+    #[test]
+    fn stores_and_retrieves_exact_bytes() {
+        let store = ObjectStore::open_in_memory().unwrap();
+        let original = object(0, b"hello");
+        let id = store.put(&original, 1).unwrap();
+
+        let fetched = store.get(id).unwrap().expect("present");
+        // Byte-exact, not merely equivalent: an identifier refers to bytes.
+        assert_eq!(fetched.tbs_bytes(), original.tbs_bytes());
+        assert_eq!(fetched.id(), id);
+    }
+
+    #[test]
+    fn storing_twice_is_idempotent() {
+        let store = ObjectStore::open_in_memory().unwrap();
+        let o = object(0, b"hello");
+        store.put(&o, 1).unwrap();
+        store.put(&o, 2).unwrap();
+        assert_eq!(store.len().unwrap(), 1);
+    }
+
+    #[test]
+    fn missing_objects_are_absent_not_errors() {
+        let store = ObjectStore::open_in_memory().unwrap();
+        assert!(store.get(ObjectId::from_bytes([1; 32])).unwrap().is_none());
+        assert!(!store.contains(ObjectId::from_bytes([1; 32])).unwrap());
+        assert!(store.is_empty().unwrap());
+    }
+
+    #[test]
+    fn tracks_highest_sequence_per_key() {
+        let store = ObjectStore::open_in_memory().unwrap();
+        let author = IdentityId::from_bytes([9; 32]);
+        let key = PublicKeyBytes::from_bytes([4; 32]);
+        assert_eq!(store.highest_sequence(author, key).unwrap(), None);
+
+        for seq in [0, 1, 2] {
+            store.put(&object(seq, b"x"), 1).unwrap();
+        }
+        assert_eq!(store.highest_sequence(author, key).unwrap(), Some(2));
+    }
+
+    #[test]
+    fn large_sequences_round_trip() {
+        // SQLite integers are signed; a sequence above i64::MAX must survive.
+        let store = ObjectStore::open_in_memory().unwrap();
+        let o = object(u64::MAX, b"x");
+        store.put(&o, 1).unwrap();
+        let author = IdentityId::from_bytes([9; 32]);
+        let key = PublicKeyBytes::from_bytes([4; 32]);
+        assert_eq!(store.highest_sequence(author, key).unwrap(), Some(u64::MAX));
+    }
+
+    #[test]
+    fn lists_an_authors_chain_in_order() {
+        let store = ObjectStore::open_in_memory().unwrap();
+        for seq in [2, 0, 1] {
+            store.put(&object(seq, b"x"), 1).unwrap();
+        }
+        let chain = store
+            .objects_by_author(IdentityId::from_bytes([9; 32]))
+            .unwrap();
+        let sequences: Vec<u64> = chain.iter().map(|o| o.tbs().unwrap().sequence).collect();
+        assert_eq!(sequences, vec![0, 1, 2]);
+    }
+}
