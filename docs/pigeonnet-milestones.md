@@ -108,6 +108,21 @@ made to fail on purpose before being trusted.
 other's signatures, delegation chains, and sequences. The corpus is committed and
 CI fails if an encoding changes.
 
+**Verified 2026-09-16.** 78 tests across the workspace. The corpus tripwire was
+proven by moving one field index and watching it fail. Two fuzz targets ran 5.8M
+executions without a crash and are now in CI. `nodectl identity create`,
+`identity show` and `object show` work end to end, keystore at `0600`.
+
+Two things the build corrected in the design: the architecture said
+`ed25519-dalek` 2 (it is 3), and integration tests needed their own lint
+allowances because `cfg_attr(test, ...)` in a library does not reach a separate
+test crate.
+
+Still open from M1: the recovery secret renders as base32, not the twelve-word
+mnemonic the quickstart shows. A 256-bit Ed25519 seed is twenty-four BIP39 words,
+not twelve, so the mnemonic needs a decision about seed width before it needs a
+wordlist. Passphrases come from `PIGEONNET_PASSPHRASE` rather than a prompt.
+
 **Decisions exercised.** D1, D2, D3, D9 (keys only), D11 (generation only).
 
 **Why the recovery key must be here.** It has to be in the genesis object for its
