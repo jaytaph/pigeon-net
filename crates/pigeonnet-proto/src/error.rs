@@ -7,7 +7,7 @@
 
 use core::fmt;
 
-use pigeonnet_core::ObjectId;
+use pigeonnet_core::{NodeId, ObjectId};
 
 /// A peer broke the protocol.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +100,17 @@ pub enum ProtocolError {
         limit: u64,
     },
 
+    /// The peer proved a different identity than the one pinned to its address.
+    ///
+    /// Either the address now points somewhere else, or something is answering
+    /// in its place. Both are worth stopping for.
+    WrongPeer {
+        /// What was pinned.
+        expected: NodeId,
+        /// What answered.
+        found: NodeId,
+    },
+
     /// A restricted stream was requested without an acceptable proof (§15.4).
     ///
     /// Carries no detail. Which of "no credential", "wrong identity" or "bad
@@ -152,6 +163,9 @@ impl fmt::Display for ProtocolError {
             Self::InvalidObject => f.write_str("object failed validation"),
             Self::InventorySpanTooWide { span, limit } => {
                 write!(f, "inventory span {span} exceeds limit of {limit}")
+            }
+            Self::WrongPeer { expected, found } => {
+                write!(f, "expected peer {expected}, but {found} answered")
             }
             Self::AccessDenied => f.write_str("not permitted to read that stream"),
             Self::Local(message) => write!(f, "local failure: {message}"),

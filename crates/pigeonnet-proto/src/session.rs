@@ -126,6 +126,8 @@ pub struct Session {
     challenged: Option<(StreamId, u64, u32)>,
     /// Initiator: how to answer a challenge, if it can.
     signer: Option<Box<dyn InboxSigner>>,
+    /// Initiator: the identity this peer is expected to prove.
+    expected_peer: Option<NodeId>,
     objects_accepted: usize,
     bytes_accepted: usize,
 }
@@ -159,9 +161,21 @@ impl Session {
             authenticated: BTreeSet::new(),
             challenged: None,
             signer: None,
+            expected_peer: None,
             objects_accepted: 0,
             bytes_accepted: 0,
         }
+    }
+
+    /// Require the peer to prove a particular identity (§17.1, D14).
+    ///
+    /// Trust on first use: the first successful handshake pins an address to an
+    /// identity, and every later one must match. A wrong address then yields a
+    /// failed handshake rather than a conversation with whoever answered.
+    #[must_use]
+    pub const fn expecting(mut self, peer: NodeId) -> Self {
+        self.expected_peer = Some(peer);
+        self
     }
 
     /// Supply a credential for reading an inbox (§15.4).
@@ -195,6 +209,7 @@ impl Session {
             authenticated: BTreeSet::new(),
             challenged: None,
             signer: None,
+            expected_peer: None,
             objects_accepted: 0,
             bytes_accepted: 0,
         }
@@ -223,6 +238,7 @@ impl Session {
             authenticated: BTreeSet::new(),
             challenged: None,
             signer: None,
+            expected_peer: None,
             objects_accepted: 0,
             bytes_accepted: 0,
         }
@@ -330,6 +346,14 @@ impl Session {
                 }),
             ) => {
                 Self::check_version(version)?;
+                if let Some(expected) = self.expected_peer
+                    && expected != node
+                {
+                    return Err(ProtocolError::WrongPeer {
+                        expected,
+                        found: node,
+                    });
+                }
                 self.peer = Some(node);
                 self.features = Features::SUPPORTED.intersect(features);
                 if let Some(identity) = self.resolving {
