@@ -38,6 +38,8 @@ pub enum ObjectType {
     DeviceKeyGranted = 2,
     /// The root key withdraws a device key's authority.
     DeviceKeyRevoked = 3,
+    /// A public post in an echo area (§6).
+    EchoPost = 4,
 }
 
 impl ObjectType {
@@ -53,6 +55,7 @@ impl ObjectType {
             1 => Ok(Self::IdentityCreated),
             2 => Ok(Self::DeviceKeyGranted),
             3 => Ok(Self::DeviceKeyRevoked),
+            4 => Ok(Self::EchoPost),
             other => Err(Error::UnknownObjectType(other)),
         }
     }

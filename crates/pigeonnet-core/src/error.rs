@@ -43,6 +43,15 @@ pub enum Error {
 
     /// Text was not valid for the identifier format it claimed to be in.
     BadIdentifier,
+
+    /// An echo area name was malformed (§6).
+    BadAreaName,
+
+    /// A post's threading fields were inconsistent (§7).
+    ///
+    /// A reply names both a parent and a thread root; a root post names neither.
+    /// One without the other is unreconstructable, and a node cannot repair it.
+    BadThreading,
 }
 
 impl fmt::Display for Error {
@@ -61,6 +70,8 @@ impl fmt::Display for Error {
                 write!(f, "{field}: expected {expected} bytes, found {actual}")
             }
             Self::BadIdentifier => f.write_str("malformed identifier"),
+            Self::BadAreaName => f.write_str("malformed echo area name"),
+            Self::BadThreading => f.write_str("a reply must name both a parent and a thread root"),
         }
     }
 }

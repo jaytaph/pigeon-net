@@ -13,6 +13,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod area;
 pub mod base32;
 pub mod bytes;
 pub mod cbor;
@@ -21,9 +22,11 @@ pub mod object;
 pub mod payload;
 pub mod time;
 
+pub use area::AreaName;
 pub use bytes::{AgreementKeyBytes, IdentityId, NodeId, ObjectId, PublicKeyBytes, SignatureBytes};
 pub use error::Error;
 pub use object::{Object, ObjectType, Tbs};
+pub use payload::EchoPost;
 pub use time::Timestamp;
 
 /// Object format version carried by every object (§31).

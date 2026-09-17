@@ -8,7 +8,8 @@ use minicbor::{Decode, Encode};
 
 use crate::{
     Error, ObjectType,
-    bytes::{AgreementKeyBytes, PublicKeyBytes},
+    area::AreaName,
+    bytes::{AgreementKeyBytes, ObjectId, PublicKeyBytes},
     cbor,
     time::Timestamp,
 };
@@ -185,6 +186,109 @@ impl Payload for DeviceKeyRevoked {
     const OBJECT_TYPE: ObjectType = ObjectType::DeviceKeyRevoked;
 }
 
+/// A public post in an echo area (§6, §7).
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+#[cbor(map)]
+pub struct EchoPost {
+    /// Which area this belongs to.
+    #[n(0)]
+    pub area: AreaName,
+
+    /// The thread root, or absent on a root post.
+    ///
+    /// A root post cannot name itself: its identifier is a hash of the bytes
+    /// being written, so the value would have to exist before it does. Absent
+    /// therefore means "I am the root", and readers substitute the object's own
+    /// identifier — the same trick genesis objects use for `author` (D3).
+    #[n(1)]
+    pub thread: Option<ObjectId>,
+
+    /// The immediate parent, or absent on a root post.
+    #[n(2)]
+    pub parent: Option<ObjectId>,
+
+    /// How to interpret `content`.
+    #[n(3)]
+    pub content_type: String,
+
+    /// The post itself.
+    #[n(4)]
+    pub content: String,
+}
+
+impl EchoPost {
+    /// A new thread.
+    #[must_use]
+    pub fn root(area: AreaName, content_type: String, content: String) -> Self {
+        Self {
+            area,
+            thread: None,
+            parent: None,
+            content_type,
+            content,
+        }
+    }
+
+    /// A reply.
+    #[must_use]
+    pub fn reply(
+        area: AreaName,
+        thread: ObjectId,
+        parent: ObjectId,
+        content_type: String,
+        content: String,
+    ) -> Self {
+        Self {
+            area,
+            thread: Some(thread),
+            parent: Some(parent),
+            content_type,
+            content,
+        }
+    }
+
+    /// Whether this starts a thread.
+    #[must_use]
+    pub const fn is_root(&self) -> bool {
+        self.thread.is_none()
+    }
+
+    /// The thread this post belongs to, given the post's own identifier.
+    #[must_use]
+    pub fn thread_root(&self, own_id: ObjectId) -> ObjectId {
+        self.thread.unwrap_or(own_id)
+    }
+
+    /// Reject inconsistent threading.
+    ///
+    /// A reply names both a parent and a thread root; a root post names neither.
+    /// One without the other cannot be placed in a tree, and no node downstream
+    /// can repair it — so it is refused at the boundary rather than stored and
+    /// rendered wrongly forever (§7).
+    fn validate(&self) -> Result<(), Error> {
+        if self.thread.is_some() == self.parent.is_some() {
+            Ok(())
+        } else {
+            Err(Error::BadThreading)
+        }
+    }
+}
+
+impl Payload for EchoPost {
+    const OBJECT_TYPE: ObjectType = ObjectType::EchoPost;
+
+    fn decode_payload(bytes: &[u8]) -> Result<Self, Error> {
+        let post: Self = cbor::from_canonical_slice(bytes)?;
+        post.validate()?;
+        Ok(post)
+    }
+
+    fn encode_payload(&self) -> Result<Vec<u8>, Error> {
+        self.validate()?;
+        cbor::to_canonical_vec(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +329,62 @@ mod tests {
             "CBOR null must not appear: {bytes:02x?}"
         );
         assert_eq!(DeviceKeyGranted::decode_payload(&bytes).unwrap(), granted);
+    }
+
+    fn area() -> AreaName {
+        AreaName::parse("GOSUB.DEV").unwrap()
+    }
+
+    #[test]
+    fn a_root_post_is_its_own_thread() {
+        let post = EchoPost::root(area(), "text/markdown".into(), "hello".into());
+        assert!(post.is_root());
+        let own = ObjectId::from_bytes([5; 32]);
+        assert_eq!(post.thread_root(own), own);
+    }
+
+    #[test]
+    fn a_reply_names_its_thread() {
+        let root = ObjectId::from_bytes([1; 32]);
+        let parent = ObjectId::from_bytes([2; 32]);
+        let post = EchoPost::reply(area(), root, parent, "text/plain".into(), "ack".into());
+        assert!(!post.is_root());
+        assert_eq!(post.thread_root(ObjectId::from_bytes([9; 32])), root);
+    }
+
+    #[test]
+    fn half_threaded_posts_are_refused() {
+        // A parent without a thread root, or the reverse, cannot be placed in a
+        // tree and cannot be repaired downstream.
+        let mut orphan = EchoPost::root(area(), "text/plain".into(), "x".into());
+        orphan.parent = Some(ObjectId::from_bytes([2; 32]));
+        assert_eq!(orphan.encode_payload(), Err(Error::BadThreading));
+
+        let mut rootless = EchoPost::root(area(), "text/plain".into(), "x".into());
+        rootless.thread = Some(ObjectId::from_bytes([1; 32]));
+        assert_eq!(rootless.encode_payload(), Err(Error::BadThreading));
+    }
+
+    #[test]
+    fn half_threaded_posts_are_refused_on_the_way_in_too() {
+        // Encoded by something that did not check, or edited in transit.
+        let mut orphan = EchoPost::root(area(), "text/plain".into(), "x".into());
+        orphan.parent = Some(ObjectId::from_bytes([2; 32]));
+        let bytes = cbor::to_canonical_vec(&orphan).unwrap();
+        assert_eq!(EchoPost::decode_payload(&bytes), Err(Error::BadThreading));
+    }
+
+    #[test]
+    fn echo_posts_round_trip() {
+        let post = EchoPost::reply(
+            area(),
+            ObjectId::from_bytes([1; 32]),
+            ObjectId::from_bytes([2; 32]),
+            "text/markdown".into(),
+            "Works here too, Debian 13.".into(),
+        );
+        let bytes = post.encode_payload().unwrap();
+        assert_eq!(EchoPost::decode_payload(&bytes).unwrap(), post);
     }
 
     #[test]
