@@ -11,6 +11,8 @@ workspace = true
 
 [dependencies]
 pigeonnet-core.workspace = true
+pigeonnet-proto.workspace = true
+minicbor.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

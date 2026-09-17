@@ -661,7 +661,9 @@ dependencies = [
 name = "pigeonnet-bundle"
 version = "0.0.0"
 dependencies = [
+ "minicbor",
  "pigeonnet-core",
+ "pigeonnet-proto",
  "proptest",
  "thiserror",
 ]
