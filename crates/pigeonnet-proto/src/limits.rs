@@ -30,6 +30,14 @@ pub struct Limits {
     pub max_inventory_span: u64,
     /// Most streams a session may work through.
     pub max_streams: usize,
+    /// Largest bundle file this node will read (§19).
+    ///
+    /// A bundle arrives on removable media with no handshake and no back
+    /// pressure, so the only thing standing between a hostile stick and this
+    /// node's memory is this number.
+    pub max_bundle_bytes: usize,
+    /// Most objects a single bundle may carry.
+    pub max_bundle_objects: usize,
 }
 
 impl Limits {
@@ -44,6 +52,8 @@ impl Limits {
         max_bytes_per_session: 256 << 20,
         max_inventory_span: 10_000,
         max_streams: 64,
+        max_bundle_bytes: 256 << 20,
+        max_bundle_objects: 100_000,
     };
 
     /// Tight limits, for tests and for nodes with very little to spare.
@@ -57,6 +67,8 @@ impl Limits {
         max_bytes_per_session: 1 << 20,
         max_inventory_span: 64,
         max_streams: 4,
+        max_bundle_bytes: 1 << 20,
+        max_bundle_objects: 64,
     };
 }
 
