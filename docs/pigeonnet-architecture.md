@@ -689,11 +689,34 @@ B -> A   chain tip
 
 Roughly 14 KB for a three-device identity at six weeks of prekey coverage.
 
-### The snapshot carries its own expiry
+### The snapshot carries its own expiry, and the reader clamps it
 
-The snapshot has a `valid_until` — 30 days by default — covering everything
-inside it: carriers, device list, prekeys. Past that date a client refuses to
-use it and refetches.
+The snapshot has a `valid_until` — 30 days by default — nominally covering
+everything inside it: carriers, device list, prekeys. Past that date a client
+refuses to use it and refetches.
+
+**That field is advisory, and a reader must not take it at face value.** The
+snapshot is an *aggregate*. Every object inside it is signed, but the wrapper is
+not — there is nobody to sign it, since any node may assemble and serve one. A
+server could therefore staple a far-future `valid_until` onto stale contents, and
+a reader that believed it would keep using prekeys and carrier lists long after
+their authors stopped standing behind them.
+
+The fix is that the guarantee is already inside the snapshot. Each `EpochPrekey`
+carries its own signed `valid_until`; each `ReachabilityClaim` and
+`CarriageAccepted` carries its own signed `expires_at`. So the effective answer
+is the **earliest** of those and the server's claim:
+
+```text
+effective_valid_until = min(
+    snapshot.valid_until,          # the server's claim, advisory
+    every contained object's own signed expiry
+)
+```
+
+A server can shorten the life of what it serves — it can always serve less — but
+it cannot extend it. Without this, *"the snapshot carries its own expiry"* would
+be a promise the format cannot keep.
 
 **Freshness is a property of the snapshot, not a consequence of running out of
 prekeys.** Section 8.1 currently leaks freshness by accident: a sender with a
@@ -701,6 +724,10 @@ stale profile exhausts the prekeys it holds and falls back. That signal
 disappears entirely if lookahead is increased (section 37), so it must not be
 load-bearing. A client displays *"your view of this identity is 41 days old"*
 rather than silently degrading.
+
+Withholding remains available to a server and is not fixed by any of this: it can
+serve an old snapshot, or none. What it cannot do is make an old one *look*
+current.
 
 ### Who holds it
 
@@ -855,8 +882,10 @@ correspondent. It is not instant, and the overlap is the delicate part.
 5. release carriage at the old carrier
 ```
 
-The snapshot's `valid_until` is what bounds the tail: after that date no
-correspondent is using a stale copy, because their client refuses to.
+The snapshot's effective expiry is what bounds the tail: after that date no
+correspondent is using a stale copy, because their client refuses to. Note that
+*effective* means the clamped value of 5.6 — the earliest signed expiry among the
+objects inside — and not whatever the serving node wrote in the wrapper.
 
 Failure modes, none of which are eliminated:
 
@@ -865,9 +894,12 @@ Failure modes, none of which are eliminated:
   generated (section 16). The sender learns only from a local timeout.
 - **Uncollected spool at the old carrier is stranded.** Sync once more before
   releasing.
-- **A hostile old carrier can serve a stale snapshot for one `valid_until`.** It
-  cannot forge a new one. Short expiry bounds the damage; asking several peers
-  routes around it.
+- **A hostile old carrier can serve a stale snapshot until its contents expire.**
+  It cannot forge a new one, and — because a reader clamps `valid_until` to the
+  earliest signed expiry inside (5.6) — it cannot extend the life of the one it
+  has by relabelling it either. Before that clamp this window was whatever the
+  departing carrier chose to write, which is the wrong party to be choosing it.
+  Asking several peers routes around it.
 - **Both carriers dying at once** requires publishing a new snapshot and waiting
   for it to spread — days, not seconds. There is no fast path without a global
   directory, and there will not be one.
@@ -3186,9 +3218,12 @@ separation section 12 draws.
   the latest `ReachabilityClaim`, and `IdentityProfile` — is fetched as a
   **snapshot**, not a journal: `current id:b3:...`, no cursor, no session state.
   About 14 KB for three devices.
-- The snapshot carries its own `valid_until`, 30 days by default. **Freshness is
-  a property of the snapshot, never a side effect of prekey exhaustion.** Clients
-  display snapshot age rather than degrading silently.
+- The snapshot carries its own `valid_until`, 30 days by default, but it is
+  **advisory**: the wrapper is an aggregate and nobody signs it. A reader clamps
+  it to the earliest signed expiry among the objects inside, so a server may
+  shorten the life of what it serves and can never extend it.
+- **Freshness is a property of the snapshot, never a side effect of prekey
+  exhaustion.** Clients display snapshot age rather than degrading silently.
 - Everything in a snapshot is self-signed, so **any node may serve it and a
   cached copy is as trustworthy as the origin's.** A holder can withhold, never
   forge.
@@ -3216,6 +3251,9 @@ peers already chosen.
 - The snapshot is world-readable: device count, carriers, and a liveness signal
   from prekey publication. No fix is compatible with letting strangers encrypt.
 - Withholding fresh prekeys is a downgrade attack onto `fs: none` (D4).
+  Clamping `valid_until` does not address this: a server that serves a stale
+  snapshot is caught, but one that serves nothing at all is indistinguishable
+  from one that has nothing.
 - A cold identity whose snapshot none of the four paths reaches cannot be
   contacted in v1 (section 37).
 

@@ -320,6 +320,34 @@ obtains usable prekeys, and learns which carriers accept for it — with the
 served by a third party verifies identically to one from the origin. An
 unauthenticated `inbox:` query is refused; an authenticated one succeeds.
 
+**Partly verified 2026-09-17.** 167 tests. A stranger holding nothing resolves an
+identity from a carrier over TCP, verifies the chain from genesis, gets usable
+prekeys and a confirmed carrier; a carrier claimed but not consented to is
+reported as *unconfirmed* rather than silently dropped. Origin and relayed
+snapshots verify identically.
+
+One refinement to D12 came out of building it: a snapshot's `valid_until` is
+advisory and a reader clamps it to the earliest signed expiry inside. Folded back
+into the architecture — see §5.6 and D12.
+
+**Stream access (D15) verified 2026-09-17.** `StreamId::Inbox` is the only
+restricted stream; everything else answers anyone who connects. The responder's
+nonce is injected at construction and the initiator's credential is a trait
+object, so `pigeonnet-proto` still holds no randomness and no cryptography.
+
+Two details the implementation had to settle. The challenge transcript is
+domain-separated with an ASCII prefix, and there is a test asserting it cannot
+parse as a signed object — a device key signs both, so without that a signature
+gathered as a challenge answer could be replayed as an object the key authored.
+And refusal is **asymmetric on purpose**: a client raises `AccessDenied` locally
+when it can see it has no usable credential, while a server that rejects a proof
+simply stops talking. A server distinguishing "denied" from "gone" would confirm
+to a prober that an inbox exists and is guarded, and a legitimate owner never
+needs the distinction.
+
+**Still open:** `NodeProfile` (D14), flagged from the start as the first thing to
+cut, and never needed by M6.
+
 **Decisions exercised.** D12, D13, D14, D15.
 
 **Risk.** Two sit in the architecture rather than the code. **`resolve` must
