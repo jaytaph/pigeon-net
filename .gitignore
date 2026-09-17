@@ -6,3 +6,6 @@ Cargo.lock.orig
 *.key
 *.pack
 /.pigeonnet
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts

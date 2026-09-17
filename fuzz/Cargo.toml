@@ -1,0 +1,30 @@
+[package]
+name = "pigeonnet-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Deliberately outside the main workspace: the fuzz harness needs nightly and
+# libfuzzer, and should not drag either into an ordinary `cargo build`.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+pigeonnet-core = { path = "../crates/pigeonnet-core" }
+
+[[bin]]
+name = "object_decode"
+path = "fuzz_targets/object_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "canonical_roundtrip"
+path = "fuzz_targets/canonical_roundtrip.rs"
+test = false
+doc = false
+bench = false

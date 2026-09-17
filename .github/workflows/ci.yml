@@ -58,6 +58,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: EmbarkStudios/cargo-deny-action@v2
 
-  # TODO(M1): add a `cargo fuzz` smoke run once there is a parser to fuzz.
-  # Deliberately absent in M0 -- a fuzz job with no targets reports success
-  # without having tested anything, which is worse than no job at all.
+  # Every object arrives from somewhere untrusted (§29). A short run on each
+  # push is a smoke test, not a campaign -- it catches the obvious regression,
+  # and longer runs belong on a schedule.
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz --locked
+      - run: cargo fuzz run object_decode -- -max_total_time=60
+        working-directory: fuzz
+      - run: cargo fuzz run canonical_roundtrip -- -max_total_time=60
+        working-directory: fuzz

@@ -599,6 +599,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "pigeonnet-core",
  "pigeonnet-net",
  "pigeonnet-node",
  "tracing",
