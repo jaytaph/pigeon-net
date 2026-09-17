@@ -44,6 +44,23 @@ enum Command {
     #[command(subcommand)]
     Echo(EchoCommand),
 
+    /// Peers this node talks to (§17.1).
+    #[command(subcommand)]
+    Peer(PeerCommand),
+
+    /// Sync with configured peers.
+    Sync {
+        /// One address, or every configured peer if omitted.
+        address: Option<String>,
+    },
+
+    /// Answer peers until stopped.
+    Serve {
+        /// Address to listen on.
+        #[arg(long, default_value = "0.0.0.0:4137")]
+        listen: String,
+    },
+
     /// Post to an echo area.
     Post {
         /// The area, e.g. GOSUB.DEV
@@ -72,6 +89,25 @@ enum Command {
         /// What to say.
         content: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum PeerCommand {
+    /// Remember a peer.
+    Add {
+        /// `host:port`. The port defaults to 4137.
+        address: String,
+        /// Require this exact node identity, instead of pinning on first use.
+        #[arg(long)]
+        expect: Option<String>,
+    },
+    /// Forget a peer. Objects learned from it are kept.
+    Remove {
+        /// The address, as given to `peer add`.
+        address: String,
+    },
+    /// Show configured peers.
+    List,
 }
 
 #[derive(Subcommand, Debug)]
@@ -171,6 +207,30 @@ fn main() -> Result<()> {
             println!("queued   for subscribed peers");
             Ok(())
         }
+        Command::Peer(PeerCommand::Add { address, expect }) => {
+            let address = with_default_port(&address);
+            let expect = expect
+                .map(|text| NodeId::parse(&text).map_err(|e| anyhow::anyhow!("{e}")))
+                .transpose()?;
+            node.store().peer_add(&address, expect, now_millis()?)?;
+            match expect {
+                Some(id) => println!("added {address}, requiring {id}"),
+                None => println!("added {address}; its identity pins on first sync"),
+            }
+            Ok(())
+        }
+        Command::Peer(PeerCommand::Remove { address }) => {
+            let address = with_default_port(&address);
+            if node.store().peer_remove(&address)? {
+                println!("removed {address}");
+            } else {
+                println!("no such peer: {address}");
+            }
+            Ok(())
+        }
+        Command::Peer(PeerCommand::List) => list_peers(&node),
+        Command::Sync { address } => run_sync(&node, address.as_deref()),
+        Command::Serve { listen } => run_serve(&node, &listen),
         Command::Resolve { identity } => show_resolved(&node, &identity),
         Command::Prekeys { lookahead } => {
             let published = node.publish_prekeys(&passphrase()?, now_millis()?, lookahead)?;
@@ -455,4 +515,125 @@ fn show_resolved(node: &Node, identity: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// `host` means `host:4137`.
+fn with_default_port(address: &str) -> String {
+    if address
+        .rsplit(':')
+        .next()
+        .is_some_and(|tail| tail.parse::<u16>().is_ok())
+    {
+        address.to_owned()
+    } else {
+        format!("{address}:{}", pigeonnet_net::DEFAULT_PORT)
+    }
+}
+
+fn list_peers(node: &Node) -> Result<()> {
+    let peers = node.store().peers()?;
+    if peers.is_empty() {
+        println!("no peers configured — try: nodectl peer add hub.example.net");
+        return Ok(());
+    }
+    for peer in peers {
+        println!("{}", peer.address);
+        match peer.node_id {
+            Some(id) => println!("  identity   {id}"),
+            None => println!("  identity   not yet pinned"),
+        }
+        match peer.last_sync_at {
+            Some(at) => println!("  last sync  {}", render::iso8601(at)),
+            None => println!("  last sync  never"),
+        }
+        if let Some(error) = peer.last_error {
+            println!("  last error {error}");
+        }
+    }
+    Ok(())
+}
+
+/// A tokio runtime, built only where one is needed.
+fn runtime() -> Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("starting the async runtime")
+}
+
+fn run_sync(node: &Node, only: Option<&str>) -> Result<()> {
+    let passphrase = passphrase()?;
+    let local = node.node_id(&passphrase)?;
+    let limits = *node.limits();
+
+    let peers: Vec<_> = match only {
+        Some(address) => {
+            let address = with_default_port(address);
+            node.store()
+                .peers()?
+                .into_iter()
+                .filter(|p| p.address == address)
+                .collect()
+        }
+        None => node.store().peers()?,
+    };
+    if peers.is_empty() {
+        println!("no peers to sync with");
+        return Ok(());
+    }
+
+    let runtime = runtime()?;
+    for peer in peers {
+        let now = now_millis()?;
+        print!("{} ... ", peer.address);
+        use std::io::Write as _;
+        std::io::stdout().flush().ok();
+
+        let result = runtime.block_on(pigeonnet_net::sync_peer(
+            node,
+            local,
+            &peer.address,
+            peer.node_id,
+            limits,
+            now,
+        ));
+
+        match result {
+            Ok(report) => {
+                if let Some(proved) = report.peer {
+                    node.store().peer_pin(&peer.address, proved)?;
+                }
+                node.store().peer_record_sync(&peer.address, now, None)?;
+                println!("{} objects", report.accepted);
+            }
+            Err(error) => {
+                // Recorded rather than only printed: a peer that has been
+                // failing for a week is worth seeing in `peer list`.
+                node.store()
+                    .peer_record_sync(&peer.address, now, Some(&error.to_string()))?;
+                println!("failed: {error}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_serve(node: &Node, listen: &str) -> Result<()> {
+    let passphrase = passphrase()?;
+    let local = node.node_id(&passphrase)?;
+    let limits = *node.limits();
+
+    let runtime = runtime()?;
+    runtime.block_on(async {
+        let listener = tokio::net::TcpListener::bind(listen)
+            .await
+            .with_context(|| format!("binding {listen}"))?;
+        println!("listening on {listen}");
+        println!("identity   {local}");
+        println!("serving    public areas and identity snapshots to anyone;");
+        println!("           inboxes only to their owner (\u{a7}15.4)");
+        pigeonnet_net::serve(node, local, &listener, limits, || now_millis().unwrap_or(0))
+            .await
+            .context("serving")
+    })
 }
