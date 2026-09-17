@@ -410,6 +410,35 @@ why it was sized XL and flagged for splitting.
   cryptographic-erasure alternative as config (D9).
 - Routing toward a recipient with hop ceiling and TTL; no bounces (D6).
 
+**Progress 2026-09-17.** The crypto core is built and tested: a ratcheting
+prekey seed (§37.1's option 2), and seal/open with per-device fan-out.
+
+Two things worth recording. Prekey secrets now come from a **one-way ratcheting
+seed** rather than a pile of stored keys — the point is not size but that
+advancing past an epoch destroys it arithmetically, instead of relying on an
+erasure the filesystem may quietly decline to perform. And the content is bound
+to the whole message header as associated data, so editing the recipient, the
+claimed `fs` level, or any wrap invalidates the message rather than redirecting
+or relabelling it.
+
+**Messages deliver 2026-09-17.** `DirectMessage` objects, inbox spooling, and
+scheduled destruction. Two nodes exchange a private message over TCP; a relay
+carries one it cannot read; destroying an epoch makes an already-delivered
+message unreadable, and the inbox says *expired* rather than *failed*, because
+forward secrecy having happened is not a fault.
+
+Three things the implementation settled. A message sealed to a destroyed epoch
+reports `MessageBody::Expired` rather than a decryption error, so a person can
+tell the mechanism from a bug. `send_message` refuses an identity it cannot
+resolve rather than reaching for the network: resolving is a network act and
+sending is not, and conflating them would make every send a lookup. And the
+identity-key fallback names `PublicKeyBytes::ZERO` as its device, meaning "the
+identity key itself" — the same convention genesis uses for `author`.
+
+Still to do here: the contact gate (D7), failure receipts (D10), at-rest
+re-encryption (D9), and routing toward a carrier rather than relying on a peer
+happening to hold the message.
+
 **Exit.** A message crosses a relay that cannot read it. It is readable on two
 devices of the recipient and on the sender's other device. A message delivered
 after `valid_until` **fails loudly** with a receipt that lets the sender retry in
