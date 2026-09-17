@@ -69,9 +69,16 @@ Applies to every milestone. A milestone is not finished until all of it holds.
 - `git init` and a first commit.
 
 **Exit.** CI is green and fails loudly on a deliberately introduced `unwrap` in
-`pigeonnet-core`.
+`pigeonnet-core`, and on a dependency that violates the crate layering.
 
-**Risk.** None worth tracking. Skipping it is the risk.
+**Verified 2026-09-16.** Both tripwires tested by deliberate breakage, then
+reverted. Also checked: the MSRV claim (`1.85` was wrong — `thiserror` needs
+let-chains — corrected to `1.88`), crate layering by dependency tree, 149 crates
+clean under `cargo audit`, and every transitive licence permissive.
+
+**Risk.** None worth tracking; skipping it is the risk. But note that a check
+which has never been observed to fail is not yet a check. Every gate here was
+made to fail on purpose before being trusted.
 
 ---
 
