@@ -39,6 +39,47 @@ enum Command {
     /// Offline transport: bundles on removable media (§19).
     #[command(subcommand)]
     Bundle(BundleCommand),
+
+    /// Public discussion areas (§6).
+    #[command(subcommand)]
+    Echo(EchoCommand),
+
+    /// Post to an echo area.
+    Post {
+        /// The area, e.g. GOSUB.DEV
+        area: String,
+        /// What to say.
+        content: String,
+    },
+
+    /// Reply to a post, inheriting its area and thread.
+    Reply {
+        /// The post being replied to.
+        parent: String,
+        /// What to say.
+        content: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum EchoCommand {
+    /// Carry an area.
+    Subscribe {
+        /// The area, e.g. GOSUB.DEV
+        area: String,
+    },
+    /// Stop carrying an area. Objects already held are kept.
+    Unsubscribe {
+        /// The area.
+        area: String,
+    },
+    /// Show subscribed areas.
+    List,
+    /// Read an area's threads.
+    Read {
+        /// The area.
+        area: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -94,6 +135,36 @@ fn main() -> Result<()> {
             export_bundle(&node, &path, peer.as_deref())
         }
         Command::Bundle(BundleCommand::Import { path }) => import_bundle(&node, &path),
+        Command::Echo(EchoCommand::Subscribe { area }) => {
+            node.subscribe(&parse_area(&area)?)?;
+            println!("subscribed to echo://{area}");
+            Ok(())
+        }
+        Command::Echo(EchoCommand::Unsubscribe { area }) => {
+            node.unsubscribe(&parse_area(&area)?)?;
+            println!("unsubscribed from echo://{area}");
+            Ok(())
+        }
+        Command::Echo(EchoCommand::List) => {
+            for area in node.subscriptions()? {
+                println!("echo://{area}");
+            }
+            Ok(())
+        }
+        Command::Echo(EchoCommand::Read { area }) => read_area(&node, &parse_area(&area)?),
+        Command::Post { area, content } => {
+            let id = node.post(&parse_area(&area)?, &content, &passphrase()?, now_millis()?)?;
+            println!("created  {id}");
+            println!("queued   for subscribed peers");
+            Ok(())
+        }
+        Command::Reply { parent, content } => {
+            let parent = ObjectId::parse(&parent).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let id = node.reply(parent, &content, &passphrase()?, now_millis()?)?;
+            println!("created  {id}");
+            println!("queued   for subscribed peers");
+            Ok(())
+        }
     }
 }
 
@@ -276,6 +347,32 @@ fn import_bundle(node: &Node, path: &std::path::Path) -> Result<()> {
         for request in requests {
             println!("    {:?} after {}", request.stream, request.after);
         }
+    }
+    Ok(())
+}
+
+fn parse_area(text: &str) -> Result<pigeonnet_core::AreaName> {
+    pigeonnet_core::AreaName::parse(text).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+fn read_area(node: &Node, area: &pigeonnet_core::AreaName) -> Result<()> {
+    let posts = node.read_area(area)?;
+    if posts.is_empty() {
+        println!("echo://{area} is empty");
+        return Ok(());
+    }
+    for post in posts {
+        let indent = "  ".repeat(post.depth);
+        println!(
+            "{indent}{}  {}",
+            render::iso8601(post.timestamp.as_millis()),
+            post.id
+        );
+        println!("{indent}  from {}", post.author);
+        for line in post.post.content.lines() {
+            println!("{indent}  {line}");
+        }
+        println!();
     }
     Ok(())
 }

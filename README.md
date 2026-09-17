@@ -6,7 +6,13 @@ ideas, modern cryptography, untrusted relays, offline-first.
 > There are no mailboxes. There are identities, immutable objects,
 > subscriptions, peers, and replication.
 
-**Status: M0.** The workspace exists and compiles. Nothing is implemented yet.
+**Status: M4 complete.** Identities, canonical objects, replication over TCP,
+offline bundles, and public echo areas with threading. Private messaging is next,
+behind the reachability work of M5.
+
+Nobody should create an identity they care about yet: recovery lands in M8, and
+until then a lost or stolen root key ends the identity. See the gate in the
+milestone map.
 
 ## Documents
 
@@ -21,12 +27,12 @@ ideas, modern cryptography, untrusted relays, offline-first.
 
 ```text
 crates/
-  pigeonnet-core     object model, canonical CBOR, ids, validation   pure, sync
-  pigeonnet-crypto   keys, signatures, key agreement, AEAD           pure, sync
-  pigeonnet-store    SQLite object store, journals, indexes          sync
+  pigeonnet-core     object model, canonical CBOR, ids, threading    pure, sync
+  pigeonnet-crypto   keys, signatures, keystore, key-chain replay    pure, sync
+  pigeonnet-store    SQLite objects, journals, cursors, subscriptions  sync
   pigeonnet-proto    replication state machine                       sans-io
   pigeonnet-bundle   .pack read/write for offline transport          pure, sync
-  pigeonnet-node     node core: store + proto + policy
+  pigeonnet-node     node core: store + proto + echoes + policy
   pigeonnet-net      transports; the only crate that knows tokio
   nodectl            command line interface
 ```
