@@ -1,0 +1,84 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/pigeonnet-core",
+    "crates/pigeonnet-crypto",
+    "crates/pigeonnet-store",
+    "crates/pigeonnet-proto",
+    "crates/pigeonnet-bundle",
+    "crates/pigeonnet-node",
+    "crates/pigeonnet-net",
+    "crates/nodectl",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"   # verified by CI; 1.85 fails (thiserror needs let-chains)
+license = "MIT OR Apache-2.0"
+authors = ["Joshua Thijssen <jthijssen@noxlogic.nl>"]
+
+# Versions resolved 2026-09-16. Pinned once here; crates reference them with
+# `dep.workspace = true` so the workspace cannot drift apart.
+[workspace.dependencies]
+# internal
+pigeonnet-core = { path = "crates/pigeonnet-core", version = "0.0.0" }
+pigeonnet-crypto = { path = "crates/pigeonnet-crypto", version = "0.0.0" }
+pigeonnet-store = { path = "crates/pigeonnet-store", version = "0.0.0" }
+pigeonnet-proto = { path = "crates/pigeonnet-proto", version = "0.0.0" }
+pigeonnet-bundle = { path = "crates/pigeonnet-bundle", version = "0.0.0" }
+pigeonnet-node = { path = "crates/pigeonnet-node", version = "0.0.0" }
+pigeonnet-net = { path = "crates/pigeonnet-net", version = "0.0.0" }
+
+# hashing and encoding (D1, D2)
+blake3 = "1.8.7"
+minicbor = { version = "2.3.0", features = ["derive", "alloc"] }
+
+# signatures and key agreement (D3, D4) -- deliberately separate keys
+ed25519-dalek = "3.0.0"
+x25519-dalek = "3.0.0"
+hkdf = "0.13.0"
+sha2 = "0.11.0"
+chacha20poly1305 = "0.11.0"
+
+# secrets at rest (D9)
+argon2 = "0.6.0"
+zeroize = "1.9.0"
+secrecy = "0.10.3"
+rand_core = "0.10.1"
+getrandom = "0.4.3"
+
+# storage -- `bundled` so there is no system SQLite dependency
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+
+# transports (pigeonnet-net only)
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "io-util", "macros"] }
+
+# cli and diagnostics
+clap = { version = "4.6.7", features = ["derive"] }
+thiserror = "2.0.20"
+anyhow = "1.0.104"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
+
+# test-only
+proptest = "1.11.0"
+
+# Lint policy is set once, here, and inherited by every crate via
+# `[lints] workspace = true`. See pigeonnet-milestones.md, "Definition of done".
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+# No panicking on any path that touches bytes from outside this process.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+# Slice indexing panics on out-of-range, which is the same failure by another name.
+indexing_slicing = "warn"
+dbg_macro = "deny"
+todo = "warn"

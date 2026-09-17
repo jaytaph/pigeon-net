@@ -1,0 +1,24 @@
+[package]
+name = "pigeonnet-crypto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+pigeonnet-core.workspace = true
+ed25519-dalek.workspace = true
+x25519-dalek.workspace = true
+chacha20poly1305.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+argon2.workspace = true
+zeroize.workspace = true
+secrecy.workspace = true
+rand_core.workspace = true
+getrandom.workspace = true
+thiserror.workspace = true
