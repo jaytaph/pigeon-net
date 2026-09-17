@@ -599,7 +599,6 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
- "pigeonnet-core",
  "pigeonnet-net",
  "pigeonnet-node",
  "tracing",
@@ -685,7 +684,6 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
  "hkdf",
- "minicbor",
  "pigeonnet-core",
  "rand_core 0.10.1",
  "secrecy",
@@ -709,7 +707,6 @@ dependencies = [
 name = "pigeonnet-node"
 version = "0.0.0"
 dependencies = [
- "getrandom 0.4.3",
  "pigeonnet-bundle",
  "pigeonnet-core",
  "pigeonnet-crypto",
@@ -717,7 +714,6 @@ dependencies = [
  "pigeonnet-store",
  "thiserror",
  "tracing",
- "zeroize",
 ]
 
 [[package]]
