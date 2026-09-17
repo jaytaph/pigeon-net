@@ -159,6 +159,18 @@ objects, invalid signatures, truncated streams, a peer that lies about its
 cursor — produces no panic, no unbounded memory growth, and no accepted invalid
 object.
 
+**Verified 2026-09-16.** 109 tests. Two real nodes with SQLite stores converge
+over TCP; cursors survive reopening the node. 19 harness cases drive a scripted
+hostile peer entirely in-process. Two new fuzz targets (frame decoding and the
+session state machine) ran 6.3M executions without a crash, and are in CI.
+
+One boundary the build made explicit: `Replica::accept` validates structure and
+the signature of the key an object's own envelope names — and deliberately not
+whether that key was *authorised*, which needs the author's key chain. A relay
+usually does not have it and has no business demanding it before carrying
+traffic. **Authority is evaluated on read.** Anything else would mean a node
+refusing to relay for identities it has never heard of, which is not a relay.
+
 **Decisions exercised.** D2, D5, D8 (limits).
 
 **Risk.** This is the largest attack surface in the system and the place where
