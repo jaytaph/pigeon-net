@@ -182,6 +182,17 @@ impl Replication<'_> {
                 | ObjectType::DeviceKeyGranted
                 | ObjectType::DeviceKeyRevoked)
         );
+        if tbs.object_type() == Ok(ObjectType::DirectMessage) {
+            // Spooled under the recipient, whoever is holding it. A carrier does
+            // this as an obligation of carriage (§5.7); any other node does it
+            // because a message it happens to hold is one it can serve to the
+            // person it is for. Reading that stream needs a proof (§15.4).
+            let message = pigeonnet_core::payload::DirectMessage::decode_payload(&tbs.payload)
+                .map_err(local)?;
+            let key = stream_key(&StreamId::Inbox(message.header.recipient))?;
+            store.journal_append(&key, id).map_err(local)?;
+        }
+
         if tbs.object_type() == Ok(ObjectType::EchoPost) {
             // Journalled into its area whether or not this node subscribes:
             // holding an object and wanting its area are separate questions, and

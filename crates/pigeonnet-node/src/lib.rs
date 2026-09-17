@@ -13,11 +13,13 @@
 
 pub mod echo;
 pub mod inbox;
+pub mod message;
 pub mod replication;
 pub mod snapshot;
 
 pub use echo::ThreadedPost;
 pub use inbox::DeviceCredential;
+pub use message::{MessageBody, ReceivedMessage};
 pub use replication::Replication;
 
 use std::{
