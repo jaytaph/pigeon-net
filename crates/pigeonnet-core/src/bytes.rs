@@ -116,6 +116,15 @@ fixed_bytes! {
     SignatureBytes, 64, "sig:"
 }
 
+fixed_bytes! {
+    /// A node, as distinct from an identity (§17).
+    ///
+    /// Identity is *who*; a node is *where*. One person may be reachable through
+    /// several nodes, and one node may carry traffic for people it has never
+    /// heard of — which is the whole point of an untrusted relay.
+    NodeId, 32, "node:"
+}
+
 impl IdentityId {
     /// The identity named by a genesis object's identifier.
     #[must_use]

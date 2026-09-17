@@ -21,7 +21,7 @@ pub mod object;
 pub mod payload;
 pub mod time;
 
-pub use bytes::{AgreementKeyBytes, IdentityId, ObjectId, PublicKeyBytes, SignatureBytes};
+pub use bytes::{AgreementKeyBytes, IdentityId, NodeId, ObjectId, PublicKeyBytes, SignatureBytes};
 pub use error::Error;
 pub use object::{Object, ObjectType, Tbs};
 pub use time::Timestamp;
