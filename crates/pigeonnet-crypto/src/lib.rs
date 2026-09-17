@@ -1,9 +1,20 @@
 //! Keys, signatures, key agreement and authenticated encryption.
 //!
-//! Private key material is wrapped in zeroizing types and never logged. Signing
-//! and key agreement use separate keys: Ed25519 keys are never converted to
-//! X25519 keys via the birational map (D4).
+//! Private key material is wrapped in zeroizing types and never rendered by
+//! `Debug`. Signing and key agreement use separate keys: Ed25519 keys are never
+//! converted to X25519 keys via the birational map (D4).
 //!
-//! Pure: no I/O. Randomness is supplied by the caller.
+//! No I/O: the keystore seals and opens byte buffers, and leaves files to the
+//! caller. Randomness comes from the operating system at key generation and
+//! at sealing, and nowhere else.
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(
+    test,
+    allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)
+)]
+
+pub mod error;
+pub mod keys;
+
+pub use error::CryptoError;
+pub use keys::{AgreementKeypair, SigningKeypair, verify};
