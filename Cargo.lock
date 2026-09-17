@@ -708,6 +708,7 @@ dependencies = [
 name = "pigeonnet-node"
 version = "0.0.0"
 dependencies = [
+ "getrandom 0.4.3",
  "pigeonnet-bundle",
  "pigeonnet-core",
  "pigeonnet-crypto",
@@ -715,6 +716,7 @@ dependencies = [
  "pigeonnet-store",
  "thiserror",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]

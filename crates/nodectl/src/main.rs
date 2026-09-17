@@ -2,9 +2,221 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
-fn main() {
+mod render;
+
+use std::{
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use anyhow::{Context as _, Result, bail};
+use clap::{Parser, Subcommand};
+use pigeonnet_core::{ObjectId, payload::IdentityCreated, payload::Payload};
+use pigeonnet_node::Node;
+
+/// Pigeonnet node control.
+#[derive(Parser, Debug)]
+#[command(name = "nodectl", version, about)]
+struct Cli {
+    /// Node directory. Defaults to $PIGEONNET_HOME, then ~/.pigeonnet
+    #[arg(long, global = true)]
+    home: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Identity management.
+    #[command(subcommand)]
+    Identity(IdentityCommand),
+
+    /// Object inspection.
+    #[command(subcommand)]
+    Object(ObjectCommand),
+}
+
+#[derive(Subcommand, Debug)]
+enum IdentityCommand {
+    /// Create this node's identity.
+    Create {
+        /// A local label. Not published, and not part of the identity.
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Show this node's identity and key state.
+    Show,
+}
+
+#[derive(Subcommand, Debug)]
+enum ObjectCommand {
+    /// Show one object.
+    Show {
+        /// Object identifier, as `obj:b3:...`
+        id: String,
+    },
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let home = resolve_home(cli.home)?;
+    let node = Node::open(&home).with_context(|| format!("opening node at {}", home.display()))?;
+
+    match cli.command {
+        Command::Identity(IdentityCommand::Create { name }) => {
+            create_identity(&node, name.as_deref())
+        }
+        Command::Identity(IdentityCommand::Show) => show_identity(&node),
+        Command::Object(ObjectCommand::Show { id }) => show_object(&node, &id),
+    }
+}
+
+fn resolve_home(flag: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(path) = flag {
+        return Ok(path);
+    }
+    if let Ok(path) = std::env::var("PIGEONNET_HOME") {
+        return Ok(PathBuf::from(path));
+    }
+    let home = std::env::var("HOME").context("neither --home, $PIGEONNET_HOME nor $HOME is set")?;
+    Ok(PathBuf::from(home).join(".pigeonnet"))
+}
+
+/// Read the keystore passphrase.
+///
+/// From the environment, deliberately not from a command-line argument: argv is
+/// visible to every process on the machine. An interactive prompt is the right
+/// answer and arrives with the rest of the CLI work; until then this is the
+/// honest option rather than the convenient one.
+fn passphrase() -> Result<Vec<u8>> {
+    match std::env::var("PIGEONNET_PASSPHRASE") {
+        Ok(value) if !value.is_empty() => Ok(value.into_bytes()),
+        _ => bail!("set PIGEONNET_PASSPHRASE (an interactive prompt is not implemented yet)"),
+    }
+}
+
+fn now_millis() -> Result<i64> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?
+        .as_millis();
+    i64::try_from(millis).context("system clock is implausibly far in the future")
+}
+
+fn create_identity(node: &Node, name: Option<&str>) -> Result<()> {
+    let passphrase = passphrase()?;
+    let created = node.create_identity(&passphrase, now_millis()?)?;
+
+    println!("Generating root key      ed25519 ........ ok");
+    println!("Generating recovery key  ed25519 ........ ok");
+    println!("Generating identity key  x25519  ........ ok");
+    println!("Writing genesis object   IdentityCreated  ok");
+    println!();
+    println!("  Your identity is");
+    println!("      {}", created.identity);
+    println!();
+    println!("  Fingerprint (read this aloud to verify in person)");
+    for line in render::fingerprint(created.identity.as_bytes()) {
+        println!("      {line}");
+    }
+    println!();
     println!(
-        "nodectl {} — nothing implemented yet; see pigeonnet-milestones.md",
-        env!("CARGO_PKG_VERSION")
+        "Granting device key      {:<16} ok",
+        name.unwrap_or("this-device")
     );
+    println!("Locking keystore         argon2id         ok");
+    println!();
+    println!("  \u{26a0}  RECOVERY KEY — write this down, on paper, now.");
+    println!();
+    println!(
+        "      {}",
+        render::recovery_phrase(&created.recovery_secret)
+    );
+    println!();
+    println!("     Not stored on this machine. Will not be shown again.");
+    println!("     Without it, a lost or stolen root key ends this identity.");
+    println!();
+    println!("  genesis      {}", created.genesis);
+    println!("  device grant {}", created.device_grant);
+    Ok(())
+}
+
+fn show_identity(node: &Node) -> Result<()> {
+    let passphrase = passphrase()?;
+    let keyring = node.keyring(&passphrase)?;
+
+    // The identity is derived from stored objects, not from the keystore: the
+    // keystore holds secrets, the chain holds the truth.
+    let genesis_author = node
+        .store()
+        .objects_by_author(pigeonnet_core::IdentityId::ZERO)?
+        .into_iter()
+        .next()
+        .context("no genesis object in the store")?;
+    let identity = pigeonnet_core::IdentityId::from_genesis(genesis_author.id());
+    let state = node.identity_state(identity)?;
+
+    println!("identity      {}", state.id());
+    println!("genesis       {}", state.id().genesis_object());
+    println!("root key      {}", state.root_key());
+    println!(
+        "recovery key  {}   (private half is on paper only)",
+        state.recovery_key()
+    );
+    println!("agreement key {}", state.agreement_key());
+    println!();
+    let device = keyring.device().public();
+    match state.capabilities_of(device) {
+        Some(capabilities) => println!("this device   {device}\n              {capabilities:?}"),
+        None => println!("this device   {device}\n              not delegated"),
+    }
+    println!();
+    println!("objects held  {}", node.store().len()?);
+    Ok(())
+}
+
+fn show_object(node: &Node, id: &str) -> Result<()> {
+    let id = ObjectId::parse(id).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let object = node
+        .object(id)?
+        .context("object not found in this node's store")?;
+    let tbs = object.tbs()?;
+
+    println!("id            {}", object.id());
+    println!("version       {}", tbs.version);
+    match tbs.object_type() {
+        Ok(t) => println!("type          {t:?} ({})", tbs.type_code),
+        Err(_) => println!(
+            "type          unknown ({}) — storable and relayable",
+            tbs.type_code
+        ),
+    }
+    println!(
+        "author        {}",
+        if tbs.is_genesis() {
+            "(genesis — this object creates the identity)".to_string()
+        } else {
+            tbs.author.to_string()
+        }
+    );
+    println!("signing key   {}", tbs.signing_key);
+    println!(
+        "timestamp     {} ({})",
+        render::iso8601(tbs.timestamp.as_millis()),
+        tbs.timestamp.as_millis()
+    );
+    println!("sequence      {}", tbs.sequence);
+    println!("payload       {} bytes", tbs.payload.len());
+    println!("signature     {}", object.signature());
+
+    if tbs.object_type() == Ok(pigeonnet_core::ObjectType::IdentityCreated)
+        && let Ok(payload) = IdentityCreated::decode_payload(&tbs.payload)
+    {
+        println!();
+        println!("  root key      {}", payload.root_key);
+        println!("  recovery key  {}", payload.recovery_key);
+        println!("  agreement key {}", payload.agreement_key);
+    }
+    Ok(())
 }
