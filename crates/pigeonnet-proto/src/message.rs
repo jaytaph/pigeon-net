@@ -6,7 +6,7 @@
 //! property to keep and an expensive one to reintroduce.
 
 use minicbor::{Decode, Encode, bytes::ByteVec};
-use pigeonnet_core::{IdentityId, NodeId, ObjectId, cbor};
+use pigeonnet_core::{AreaName, IdentityId, NodeId, ObjectId, cbor};
 
 use crate::{ProtocolError, limits::Limits};
 
@@ -61,7 +61,9 @@ impl core::fmt::Debug for Features {
 /// M2 implements whole-store replication and identity chains. Echo areas, file
 /// areas and inboxes are further variants, added by the milestones that
 /// introduce them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
+/// Not `Copy`: an area name owns its text, and interning it to win back a
+/// `Copy` impl would trade a real cost for a cosmetic one.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Encode, Decode)]
 pub enum StreamId {
     /// Everything this node holds and is willing to share.
     #[n(0)]
@@ -73,6 +75,13 @@ pub enum StreamId {
     /// signed.
     #[n(1)]
     Identity(#[n(0)] IdentityId),
+    /// One echo area (§6).
+    ///
+    /// A node subscribing to `TECH.RUST` and nothing else syncs exactly that,
+    /// which is what makes a subscription mean something rather than being a
+    /// display filter over everything.
+    #[n(2)]
+    Echo(#[n(0)] AreaName),
 }
 
 /// One journal position and the object at it.

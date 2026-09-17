@@ -238,7 +238,7 @@ fn rejects_a_journal_that_goes_backwards() {
                 features: Features::SUPPORTED,
             }),
             Message::Want { stream, .. } => Some(Message::Have {
-                stream: *stream,
+                stream: stream.clone(),
                 entries: vec![
                     JournalEntry {
                         position: 5,
@@ -273,7 +273,7 @@ fn rejects_entries_at_or_below_our_cursor() {
             }),
             // We asked for `after: 0`, so position 0 is not after it.
             Message::Want { stream, .. } => Some(Message::Have {
-                stream: *stream,
+                stream: stream.clone(),
                 entries: vec![JournalEntry {
                     position: 0,
                     object: pigeonnet_core::ObjectId::from_bytes([1; 32]),
@@ -303,7 +303,7 @@ fn rejects_unsolicited_objects() {
                 features: Features::SUPPORTED,
             }),
             Message::Want { stream, .. } => Some(Message::Have {
-                stream: *stream,
+                stream: stream.clone(),
                 entries: vec![JournalEntry {
                     position: 1,
                     object: Object::from_canonical_bytes(&object(1)).unwrap().id(),
@@ -335,7 +335,7 @@ fn rejects_garbage_in_place_of_an_object() {
                 features: Features::SUPPORTED,
             }),
             Message::Want { stream, .. } => Some(Message::Have {
-                stream: *stream,
+                stream: stream.clone(),
                 entries: vec![JournalEntry {
                     position: 1,
                     object: Object::from_canonical_bytes(&object(1)).unwrap().id(),

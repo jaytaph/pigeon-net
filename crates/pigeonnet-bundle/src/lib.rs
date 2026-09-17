@@ -103,7 +103,7 @@ impl core::fmt::Display for BundleError {
 impl core::error::Error for BundleError {}
 
 /// Where a cursor stands for one stream.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 #[cbor(map)]
 pub struct StreamCursor {
     /// The stream.
@@ -204,7 +204,7 @@ impl Bundle {
                 }
             }
             sections.push(Section {
-                stream: request.stream,
+                stream: request.stream.clone(),
                 entries,
             });
         }

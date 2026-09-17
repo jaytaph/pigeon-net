@@ -362,7 +362,7 @@ impl Session {
             .map_err(|e| ProtocolError::Local(e.0))?;
 
         self.progress = Some(StreamProgress {
-            stream,
+            stream: stream.clone(),
             cursor,
             batch_high: cursor,
             more: false,

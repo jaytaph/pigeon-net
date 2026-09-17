@@ -116,7 +116,11 @@ impl Replica for MemoryReplica {
     }
 
     fn cursor(&self, peer: NodeId, stream: &StreamId) -> Result<u64, ReplicaError> {
-        Ok(self.cursors.get(&(peer, *stream)).copied().unwrap_or(0))
+        Ok(self
+            .cursors
+            .get(&(peer, stream.clone()))
+            .copied()
+            .unwrap_or(0))
     }
 
     fn set_cursor(
@@ -125,7 +129,7 @@ impl Replica for MemoryReplica {
         stream: &StreamId,
         position: u64,
     ) -> Result<(), ReplicaError> {
-        self.cursors.insert((peer, *stream), position);
+        self.cursors.insert((peer, stream.clone()), position);
         Ok(())
     }
 }
