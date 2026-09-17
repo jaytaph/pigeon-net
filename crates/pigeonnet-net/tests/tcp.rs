@@ -45,7 +45,7 @@ async fn pull(
     let serving = async {
         let (socket, _) = listener.accept().await.unwrap();
         let mut framed = Framed::new(socket, limits);
-        let mut session = Session::responder(server_id, limits);
+        let mut session = Session::responder(server_id, limits, [0x22; 32]);
         let mut replica = server.replication(NOW);
         serve_session(&mut framed, &mut session, &mut replica).await
     };
