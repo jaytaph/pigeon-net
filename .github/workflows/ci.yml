@@ -71,3 +71,7 @@ jobs:
         working-directory: fuzz
       - run: cargo fuzz run canonical_roundtrip -- -max_total_time=60
         working-directory: fuzz
+      - run: cargo fuzz run frame_decode -- -max_total_time=60
+        working-directory: fuzz
+      - run: cargo fuzz run session_drive -- -max_total_time=60
+        working-directory: fuzz

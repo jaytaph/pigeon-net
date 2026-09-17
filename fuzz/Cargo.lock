@@ -138,6 +138,16 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "pigeonnet-core",
+ "pigeonnet-proto",
+]
+
+[[package]]
+name = "pigeonnet-proto"
+version = "0.0.0"
+dependencies = [
+ "minicbor",
+ "pigeonnet-core",
+ "thiserror",
 ]
 
 [[package]]

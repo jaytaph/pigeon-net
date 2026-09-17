@@ -14,6 +14,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 pigeonnet-core = { path = "../crates/pigeonnet-core" }
+pigeonnet-proto = { path = "../crates/pigeonnet-proto" }
 
 [[bin]]
 name = "object_decode"
@@ -25,6 +26,20 @@ bench = false
 [[bin]]
 name = "canonical_roundtrip"
 path = "fuzz_targets/canonical_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "frame_decode"
+path = "fuzz_targets/frame_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "session_drive"
+path = "fuzz_targets/session_drive.rs"
 test = false
 doc = false
 bench = false
