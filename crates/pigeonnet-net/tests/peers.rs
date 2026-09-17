@@ -57,7 +57,7 @@ where
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap().to_string();
 
-    let serving = serve(server, server_id, &listener, Limits::DEFAULT, || NOW);
+    let serving = serve(server, server_id, &listener, Limits::DEFAULT, true, || NOW);
     tokio::select! {
         result = serving => panic!("server stopped early: {result:?}"),
         outcome = client_work(address) => outcome,
@@ -203,4 +203,75 @@ async fn one_failing_peer_does_not_stop_the_server() {
     })
     .await;
     assert!(report.accepted > 0);
+}
+
+#[tokio::test]
+async fn one_outbound_connection_syncs_both_ways() {
+    // The case that matters for a node behind a firewall: it dials out once,
+    // and its own posts leave. Without the reciprocal phase a leaf can read the
+    // network and never contribute to it (§3.5).
+    let (_h_dir, hub, hub_id) = node("hub7");
+    let (_l_dir, leaf, leaf_id) = node("leaf7");
+    hub.subscribe(&area()).unwrap();
+    leaf.subscribe(&area()).unwrap();
+    hub.post(&area(), "hub says hello", PASS, NOW).unwrap();
+    leaf.post(&area(), "posted from behind a nat", PASS, NOW)
+        .unwrap();
+
+    let leaf_ref = &leaf;
+    let report = with_server(&hub, hub_id, |address| async move {
+        sync_peer(leaf_ref, leaf_id, &address, None, Limits::DEFAULT, NOW)
+            .await
+            .unwrap()
+    })
+    .await;
+    assert!(report.offered, "the reciprocal phase ran");
+
+    let on_hub: Vec<String> = hub
+        .read_area(&area())
+        .unwrap()
+        .into_iter()
+        .map(|p| p.post.content)
+        .collect();
+    assert!(
+        on_hub.iter().any(|c| c == "posted from behind a nat"),
+        "the leaf never dialled in, but its post arrived: {on_hub:?}"
+    );
+
+    let on_leaf: Vec<String> = leaf
+        .read_area(&area())
+        .unwrap()
+        .into_iter()
+        .map(|p| p.post.content)
+        .collect();
+    assert!(on_leaf.iter().any(|c| c == "hub says hello"));
+}
+
+#[tokio::test]
+async fn serve_only_declines_to_collect() {
+    // A node is never obliged (§15.4). An operator who wants to be a read-only
+    // source can be one, and a leaf then cannot publish through it.
+    let (_h_dir, hub, hub_id) = node("hub8");
+    let (_l_dir, leaf, leaf_id) = node("leaf8");
+    hub.subscribe(&area()).unwrap();
+    leaf.subscribe(&area()).unwrap();
+    leaf.post(&area(), "please take this", PASS, NOW).unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let leaf_ref = &leaf;
+
+    tokio::select! {
+        result = serve(&hub, hub_id, &listener, Limits::DEFAULT, false, || NOW) => {
+            panic!("server stopped early: {result:?}")
+        }
+        () = async move {
+            let _ = sync_peer(leaf_ref, leaf_id, &address, None, Limits::DEFAULT, NOW).await;
+        } => {}
+    }
+
+    assert!(
+        hub.read_area(&area()).unwrap().is_empty(),
+        "serve-only collected anyway"
+    );
 }

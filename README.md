@@ -37,6 +37,12 @@ nodectl sync
 nodectl echo read GOSUB.DEV
 ```
 
+One outbound connection syncs **both ways**: the caller pulls, then serves while
+the peer pulls. So a node behind NAT or a firewall does not need to be reachable
+to be a full participant — it dials out, and its own posts leave with the same
+connection. `nodectl serve --serve-only` turns the reciprocal half off for an
+operator who wants to be a read-only source.
+
 A peer's identity **pins on first sync**, like an SSH host key. If something else
 later answers that address, the sync fails and says so rather than continuing with
 a stranger. `nodectl peer list` shows what is pinned and why the last attempt

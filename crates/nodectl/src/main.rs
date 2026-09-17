@@ -632,7 +632,9 @@ fn run_serve(node: &Node, listen: &str) -> Result<()> {
         println!("identity   {local}");
         println!("serving    public areas and identity snapshots to anyone;");
         println!("           inboxes only to their owner (\u{a7}15.4)");
-        pigeonnet_net::serve(node, local, &listener, limits, || now_millis().unwrap_or(0))
+        pigeonnet_net::serve(node, local, &listener, limits, true, || {
+            now_millis().unwrap_or(0)
+        })
             .await
             .context("serving")
     })
