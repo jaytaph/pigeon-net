@@ -699,10 +699,7 @@ dependencies = [
 name = "pigeonnet-net"
 version = "0.0.0"
 dependencies = [
- "getrandom 0.4.3",
- "pigeonnet-core",
  "pigeonnet-node",
- "pigeonnet-proto",
  "thiserror",
  "tokio",
  "tracing",
