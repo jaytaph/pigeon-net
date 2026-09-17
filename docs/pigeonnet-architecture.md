@@ -395,6 +395,26 @@ A directory alone cannot attach a name to an identity, so it cannot squat a
 name onto someone or attribute a loaded name to them. An identity alone cannot
 mint a name in someone else's namespace.
 
+### Three tiers of name, and they are not interchangeable
+
+| tier | who vouches | forgeable by |
+|---|---|---|
+| local label | you, privately | nobody — it never leaves your machine |
+| self-asserted (`IdentityProfile`) | the identity itself | the identity, freely |
+| bound (`NameClaim` + `NameGranted`) | an identity **and** a directory | neither alone |
+
+A self-asserted display name is *authenticated* — it sits inside a signed object,
+so no relay can alter it — but it is not *verified*. It is worth about what an
+email `From:` header is worth, and a client must never present it as though
+anyone else had agreed to it.
+
+The local label is the tier people actually rely on day to day, and it is the
+strongest of the three against forgery for a reason that has nothing to do with
+cryptography: it is never published, never replicated, and never travels in an
+object, so there is no one to forge it. It also means a local label always
+outranks a self-asserted one in display — your opinion about who somebody is
+should not be overridden by their opinion about who they are.
+
 ### Resolution is pin-on-first-use
 
 The first time `joshua@gosub` resolves to `id:b3:9fq2...`, **that pair is

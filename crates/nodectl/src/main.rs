@@ -86,6 +86,14 @@ enum Command {
     /// Show private messages addressed to this node.
     Inbox,
 
+    /// This identity's own profile (§5.6).
+    #[command(subcommand)]
+    Profile(ProfileCommand),
+
+    /// Local labels for other identities. Never published (§5.2).
+    #[command(subcommand)]
+    Name(NameCommand),
+
     /// Destroy epoch secrets whose retention window has closed (§8.1).
     ///
     /// Irreversible. Meant for a schedule: a node that never runs this keeps
@@ -113,6 +121,38 @@ enum Command {
         /// What to say.
         content: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum ProfileCommand {
+    /// Publish what this identity calls itself.
+    ///
+    /// Self-asserted, and shown to others with that caveat attached. It is not a
+    /// name anyone else has agreed to -- that is `NameGranted`, and it is M8.
+    SetName {
+        /// The display name.
+        name: String,
+    },
+    /// Clear the published display name.
+    ClearName,
+}
+
+#[derive(Subcommand, Debug)]
+enum NameCommand {
+    /// Label an identity, for this node only.
+    Set {
+        /// The identity.
+        identity: String,
+        /// What to call them.
+        label: String,
+    },
+    /// Forget a label.
+    Remove {
+        /// The identity.
+        identity: String,
+    },
+    /// Show every local label.
+    List,
 }
 
 #[derive(Subcommand, Debug)]
@@ -264,6 +304,44 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Inbox => show_inbox(&node),
+        Command::Profile(ProfileCommand::SetName { name }) => {
+            let id = node.publish_profile(Some(name.clone()), &passphrase()?, now_millis()?)?;
+            println!("published {id}");
+            println!("others will see  {name}  (self-asserted)");
+            Ok(())
+        }
+        Command::Profile(ProfileCommand::ClearName) => {
+            let id = node.publish_profile(None, &passphrase()?, now_millis()?)?;
+            println!("published {id}");
+            println!("display name cleared");
+            Ok(())
+        }
+        Command::Name(NameCommand::Set { identity, label }) => {
+            let identity = parse_identity(&identity)?;
+            node.set_local_name(identity, &label, now_millis()?)?;
+            println!("{identity}");
+            println!("  is now, to this node only: {label}");
+            Ok(())
+        }
+        Command::Name(NameCommand::Remove { identity }) => {
+            let identity = parse_identity(&identity)?;
+            if node.remove_local_name(identity)? {
+                println!("label removed");
+            } else {
+                println!("no label for that identity");
+            }
+            Ok(())
+        }
+        Command::Name(NameCommand::List) => {
+            let names = node.local_names()?;
+            if names.is_empty() {
+                println!("no local labels -- try: nodectl name set <identity> <label>");
+            }
+            for (identity, label) in names {
+                println!("{label:<20} {identity}");
+            }
+            Ok(())
+        }
         Command::Expire => {
             let destroyed = node.destroy_expired_prekeys(&passphrase()?, now_millis()?)?;
             match destroyed {
@@ -483,6 +561,7 @@ fn parse_area(text: &str) -> Result<pigeonnet_core::AreaName> {
 }
 
 fn read_area(node: &Node, area: &pigeonnet_core::AreaName) -> Result<()> {
+    let now = now_millis()?;
     let posts = node.read_area(area)?;
     if posts.is_empty() {
         println!("echo://{area} is empty");
@@ -495,7 +574,7 @@ fn read_area(node: &Node, area: &pigeonnet_core::AreaName) -> Result<()> {
             render::iso8601(post.timestamp.as_millis()),
             post.id
         );
-        println!("{indent}  from {}", post.author);
+        println!("{indent}  from {}", who(node, post.author, now));
         for line in post.post.content.lines() {
             println!("{indent}  {line}");
         }
@@ -691,7 +770,8 @@ fn run_serve(node: &Node, listen: &str, reciprocate: bool) -> Result<()> {
 }
 
 fn show_inbox(node: &Node) -> Result<()> {
-    let messages = node.inbox(&passphrase()?, now_millis()?)?;
+    let now = now_millis()?;
+    let messages = node.inbox(&passphrase()?, now)?;
     if messages.is_empty() {
         println!("inbox is empty");
         return Ok(());
@@ -706,7 +786,7 @@ fn show_inbox(node: &Node) -> Result<()> {
             render::iso8601(message.timestamp.as_millis()),
             message.id
         );
-        println!("  from     {}", message.sender);
+        println!("  from     {}", who(node, message.sender, now));
         println!("  secrecy  {secrecy}");
         match message.body {
             pigeonnet_node::MessageBody::Opened(text) => {
@@ -730,4 +810,26 @@ fn show_inbox(node: &Node) -> Result<()> {
         println!();
     }
     Ok(())
+}
+
+fn parse_identity(text: &str) -> Result<pigeonnet_core::IdentityId> {
+    pigeonnet_core::IdentityId::parse(text).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// How to show who authored something.
+///
+/// A local label stands alone -- it is this operator's own and needs no caveat. A
+/// self-asserted one always carries the caveat, because nobody but its owner
+/// vouches for it. With neither, the identifier is the name.
+fn who(node: &Node, identity: pigeonnet_core::IdentityId, now: i64) -> String {
+    match node.naming(identity, now) {
+        Ok(naming) => match naming.best() {
+            Some(label) if naming.best_is_asserted() => {
+                format!("{label} (self-asserted)  {identity}")
+            }
+            Some(label) => format!("{label}  {identity}"),
+            None => identity.to_string(),
+        },
+        Err(_) => identity.to_string(),
+    }
 }

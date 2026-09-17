@@ -14,12 +14,14 @@
 pub mod echo;
 pub mod inbox;
 pub mod message;
+pub mod naming;
 pub mod replication;
 pub mod snapshot;
 
 pub use echo::ThreadedPost;
 pub use inbox::DeviceCredential;
 pub use message::{MessageBody, ReceivedMessage};
+pub use naming::Naming;
 pub use replication::Replication;
 
 use std::{
@@ -61,6 +63,8 @@ pub enum NodeError {
     NotInitialised,
     /// Nothing is known about that identity — resolve or sync first (D12).
     UnknownIdentity(IdentityId),
+    /// A local label was empty or too long.
+    BadLabel,
     /// A snapshot did not verify.
     Snapshot(pigeonnet_crypto::SnapshotError),
     /// A bundle could not be read or written.
@@ -95,6 +99,11 @@ impl core::fmt::Display for NodeError {
             Self::AlreadyInitialised => f.write_str("this node already holds an identity"),
             Self::NotInitialised => f.write_str("no identity yet -- run `nodectl identity create`"),
             Self::Bundle(e) => write!(f, "{e}"),
+            Self::BadLabel => write!(
+                f,
+                "a label must be 1 to {} characters",
+                crate::naming::MAX_LABEL
+            ),
             Self::UnknownIdentity(id) => {
                 write!(f, "nothing known about {id} -- resolve or sync first")
             }

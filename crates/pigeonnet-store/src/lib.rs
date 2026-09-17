@@ -153,6 +153,16 @@ impl ObjectStore {
                  last_error   TEXT
              ) STRICT;
 
+             -- What *this operator* calls other identities. Purely local: these
+             -- labels are never published, never replicated, and never travel in
+             -- an object. That is what makes them unforgeable -- nobody else can
+             -- influence what your own address book says (§5.2).
+             CREATE TABLE IF NOT EXISTS address_book (
+                 identity BLOB PRIMARY KEY NOT NULL,
+                 label    TEXT NOT NULL,
+                 added_at INTEGER NOT NULL
+             ) STRICT;
+
              -- Which echo areas this node carries (§6).
              CREATE TABLE IF NOT EXISTS subscriptions (
                  area TEXT PRIMARY KEY NOT NULL
@@ -420,6 +430,62 @@ impl ObjectStore {
                 |row| row.get(0),
             )
             .optional()?)
+    }
+
+    /// Label an identity, for this node's eyes only.
+    ///
+    /// Overwrites any previous label: unlike a peer's pinned identity, a petname
+    /// is the operator's own opinion and they are entitled to change it.
+    pub fn name_set(&self, identity: IdentityId, label: &str, now: i64) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO address_book (identity, label, added_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT (identity) DO UPDATE SET label = excluded.label",
+            params![identity.as_bytes().as_slice(), label, now],
+        )?;
+        Ok(())
+    }
+
+    /// What this node calls an identity, if anything.
+    pub fn name_of(&self, identity: IdentityId) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT label FROM address_book WHERE identity = ?1",
+                params![identity.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Forget a label.
+    pub fn name_remove(&self, identity: IdentityId) -> Result<bool, StoreError> {
+        Ok(self.conn.execute(
+            "DELETE FROM address_book WHERE identity = ?1",
+            params![identity.as_bytes().as_slice()],
+        )? > 0)
+    }
+
+    /// Every label, by label.
+    pub fn names(&self) -> Result<Vec<(IdentityId, String)>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT identity, label FROM address_book ORDER BY label")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, label) = row?;
+            let id: [u8; 32] = id.as_slice().try_into().map_err(|_| {
+                StoreError::Corrupt(pigeonnet_core::Error::BadLength {
+                    field: "identity",
+                    expected: 32,
+                    actual: id.len(),
+                })
+            })?;
+            out.push((IdentityId::from_bytes(id), label));
+        }
+        Ok(out)
     }
 
     /// Remember a peer. Adding the same address twice keeps the first row,
@@ -794,6 +860,24 @@ mod tests {
             store.state("identity").unwrap().as_deref(),
             Some(b"second".as_slice())
         );
+    }
+
+    #[test]
+    fn a_petname_is_the_operators_own_and_may_change() {
+        let store = ObjectStore::open_in_memory().unwrap();
+        let id = IdentityId::from_bytes([7; 32]);
+        assert_eq!(store.name_of(id).unwrap(), None);
+
+        store.name_set(id, "jaytaph", 1).unwrap();
+        assert_eq!(store.name_of(id).unwrap().as_deref(), Some("jaytaph"));
+
+        // Unlike a pinned peer identity, this is opinion, not evidence.
+        store.name_set(id, "joshua", 2).unwrap();
+        assert_eq!(store.name_of(id).unwrap().as_deref(), Some("joshua"));
+
+        assert_eq!(store.names().unwrap(), vec![(id, "joshua".to_owned())]);
+        assert!(store.name_remove(id).unwrap());
+        assert!(!store.name_remove(id).unwrap());
     }
 
     #[test]
