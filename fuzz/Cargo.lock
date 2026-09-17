@@ -124,6 +124,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pigeonnet-bundle"
+version = "0.0.0"
+dependencies = [
+ "minicbor",
+ "pigeonnet-core",
+ "pigeonnet-proto",
+ "thiserror",
+]
+
+[[package]]
 name = "pigeonnet-core"
 version = "0.0.0"
 dependencies = [
@@ -137,6 +147,7 @@ name = "pigeonnet-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "pigeonnet-bundle",
  "pigeonnet-core",
  "pigeonnet-proto",
 ]

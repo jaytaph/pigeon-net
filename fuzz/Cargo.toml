@@ -15,6 +15,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 pigeonnet-core = { path = "../crates/pigeonnet-core" }
 pigeonnet-proto = { path = "../crates/pigeonnet-proto" }
+pigeonnet-bundle = { path = "../crates/pigeonnet-bundle" }
 
 [[bin]]
 name = "object_decode"
@@ -40,6 +41,13 @@ bench = false
 [[bin]]
 name = "session_drive"
 path = "fuzz_targets/session_drive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bundle_decode"
+path = "fuzz_targets/bundle_decode.rs"
 test = false
 doc = false
 bench = false
