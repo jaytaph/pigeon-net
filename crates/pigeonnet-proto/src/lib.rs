@@ -5,3 +5,13 @@
 //! hostile peer and by a fuzzer rather than by a network.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
+pub mod error;
+pub mod limits;
+pub mod message;
+pub mod replica;
+
+pub use error::ProtocolError;
+pub use limits::Limits;
+pub use message::{Features, JournalEntry, Message, PROTOCOL_VERSION, StreamId};
+pub use replica::{AcceptError, Replica, ReplicaError};
