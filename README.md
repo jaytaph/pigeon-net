@@ -18,6 +18,22 @@ Nobody should create an identity they care about yet: recovery lands in M8, and
 until then a lost or stolen root key ends the identity. See the gate in the
 milestone map.
 
+## Written by AI, on purpose
+
+Every line of this repository — code, tests, documents, this sentence — was
+written by an AI agent. That is not a disclaimer, it is how the project is built,
+and it is meant to continue: **pull requests should be agent-generated and follow
+[`AGENTS.md`](AGENTS.md)**.
+
+`AGENTS.md` is where the rules that cannot be inferred from the code live: what
+must never panic, which crates must stay pure, how commits are split, and the
+mistakes this repo has already made so the next agent does not repeat them. The
+architecture document says what to build; `AGENTS.md` says how to work here.
+
+None of that lowers the bar. `./scripts/check-all.sh` is the gate, every commit
+must build on its own, and a change that contradicts a locked decision reopens the
+decision in the document rather than routing around it in the code.
+
 ## Two nodes, one conversation
 
 On the machine that stays up:
@@ -160,6 +176,8 @@ per-area cursor in the store.
 |---|---|
 | [`pigeonnet-architecture.md`](docs/pigeonnet-architecture.md) | What the system is. Decisions D1–D15 in §33 |
 | [`pigeonnet-milestones.md`](docs/pigeonnet-milestones.md) | What order to build it in, and how to tell a piece is done |
+| [`AGENTS.md`](AGENTS.md) | How to work in this repository. Read before opening a pull request |
+| [`agent-notes.md`](docs/agent-notes.md) | What agents found out the hard way, each with the command that checks it |
 | [`deny.toml`](deny.toml) | Supply-chain policy: permitted licences, advisory and source rules |
 | [`pigeonnet-quickstart.md`](docs/pigeonnet-quickstart.md) | The target user experience. Written before the tool existed; files (M7) and recovery (M8) are still ahead of it |
 
