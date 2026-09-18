@@ -30,7 +30,7 @@ pub use payload::{
     CarriageAccepted, Carrier, DirectMessage, EchoPost, EpochPrekey, ForwardSecrecy,
     IdentityProfile, MessageHeader, ReachabilityClaim, WrappedKey,
 };
-pub use time::Timestamp;
+pub use time::{Civil, Timestamp};
 
 /// Object format version carried by every object (§31).
 ///

@@ -33,28 +33,14 @@ pub(crate) fn recovery_phrase(secret: &[u8; 32]) -> String {
 
 /// Format milliseconds since the epoch as an ISO 8601 instant in UTC.
 ///
-/// Hand-rolled rather than pulling in a date library for one call site. Uses the
-/// civil-from-days algorithm, which is exact for all representable dates.
+/// The calendar arithmetic lives in `pigeonnet_core::Timestamp::civil`, so that
+/// every tool renders the same instant identically.
 pub(crate) fn iso8601(millis: i64) -> String {
-    let (days, time_of_day) = (millis.div_euclid(86_400_000), millis.rem_euclid(86_400_000));
-    let (year, month, day) = civil_from_days(days);
-    let (seconds, milliseconds) = (time_of_day / 1000, time_of_day % 1000);
-    let (hour, minute, second) = (seconds / 3600, (seconds / 60) % 60, seconds % 60);
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{milliseconds:03}Z")
-}
-
-/// Days since 1970-01-01 to a civil date. Howard Hinnant's algorithm.
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    (if m <= 2 { y + 1 } else { y }, m as u32, d as u32)
+    let c = pigeonnet_core::Timestamp::from_millis(millis).civil();
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        c.year, c.month, c.day, c.hour, c.minute, c.second, c.millisecond
+    )
 }
 
 #[cfg(test)]
