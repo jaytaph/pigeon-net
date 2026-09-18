@@ -138,6 +138,13 @@ fn boxed<'a>(theme: Theme, title: &'a str) -> Block<'a> {
         .style(theme.base())
 }
 
+/// How many lines the reader spends on a message header.
+///
+/// Four fields and the rule beneath them. `App::scroll_limit` subtracts this to
+/// find how much of the frame is left for the message itself, so the two must
+/// agree — hence a constant rather than the number written twice.
+pub(crate) const READER_HEADER: u16 = 5;
+
 /// Draw the reply structure the way `tree(1)` does.
 ///
 /// `read_area` hands back a pre-order walk with a depth on each post, which is
@@ -354,16 +361,21 @@ fn reader(frame: &mut Frame, app: &App, area: Rect) {
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Min(0)])
+        .constraints([Constraint::Length(READER_HEADER), Constraint::Min(0)])
         .split(inner);
 
-    // The kludge-line header these readers all showed. Every field here is from
-    // the signed object; nothing is inferred.
+    // The kludge-line header these readers all showed, closed off by a rule so
+    // the message below it is plainly the message. Every field here is from the
+    // signed object; nothing is inferred.
     let header = vec![
         header_line(app, "From", &app.who(post.author)),
         header_line(app, "Date", &crate::timestamp(post.timestamp)),
         header_line(app, "Area", &post.post.area.to_string()),
         header_line(app, "Msg", &post.id.to_string()),
+        Line::from(Span::styled(
+            "\u{2500}".repeat(usize::from(inner.width)),
+            app.theme.border(),
+        )),
     ];
     frame.render_widget(Paragraph::new(Text::from(header)), at(&rows, 0));
 
@@ -524,7 +536,7 @@ mod tests {
         }
     }
 
-    fn empty_app() -> (Temp, App) {
+    fn app_with(passphrase: Option<Vec<u8>>) -> (Temp, App) {
         // Unique per call: tests run in parallel inside one process, and a shared
         // directory means one test's cleanup deletes another test's node.
         use std::sync::atomic::{AtomicU32, Ordering};
@@ -537,8 +549,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         let node = pigeonnet_node::Node::open(&dir).unwrap();
-        let app = App::new(node, None, Theme::Ice).unwrap();
+        let app = App::new(node, passphrase, Theme::Ice).unwrap();
         (Temp(dir), app)
+    }
+
+    /// An empty node that can write. Nothing here signs anything, so the
+    /// passphrase is never used to open a keystore.
+    fn empty_app() -> (Temp, App) {
+        app_with(Some(b"passphrase".to_vec()))
+    }
+
+    /// An empty node opened without a passphrase.
+    fn read_only_app() -> (Temp, App) {
+        app_with(None)
     }
 
     #[test]
@@ -647,7 +670,7 @@ mod tests {
     fn an_empty_node_still_draws_a_usable_screen() {
         // The first thing a new operator sees. It must say what to do next rather
         // than present an empty box.
-        let (_temp, app) = empty_app();
+        let (_temp, app) = read_only_app();
         let text = screen(&app, 80, 24);
         assert!(text.contains("Pigeonnet Reader"), "{text}");
         assert!(text.contains("Message Areas"), "{text}");
@@ -667,6 +690,14 @@ mod tests {
         }
         app.show_help();
         for (width, height) in [(80, 25), (40, 10), (20, 6)] {
+            let _ = screen(&app, width, height);
+        }
+
+        // Compose too: its header is a fixed height, so a frame shorter than the
+        // header is the case most likely to go wrong.
+        app.back();
+        app.begin_post();
+        for (width, height) in [(80, 25), (20, 6), (10, 4)] {
             let _ = screen(&app, width, height);
         }
     }

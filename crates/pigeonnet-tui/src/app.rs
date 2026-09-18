@@ -281,8 +281,8 @@ impl App {
         };
         let (width, height) = self.size;
         // The reader's body: the frame less the title, status and key bars, less
-        // the box borders, less the four header lines.
-        let body = height.saturating_sub(3 + 2 + 4);
+        // the box borders, less the message header.
+        let body = height.saturating_sub(3 + 2 + crate::ui::READER_HEADER);
         let wrapped = wrapped_lines(&post.post.content, width.saturating_sub(2));
         u16::try_from(wrapped.saturating_sub(usize::from(body))).unwrap_or(u16::MAX)
     }
