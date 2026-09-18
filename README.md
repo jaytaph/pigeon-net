@@ -174,7 +174,7 @@ per-area cursor in the store.
 
 | | |
 |---|---|
-| [`pigeonnet-architecture.md`](docs/pigeonnet-architecture.md) | What the system is. Decisions D1–D15 in §33 |
+| [`pigeonnet-architecture.md`](docs/pigeonnet-architecture.md) | What the system is. Decisions D1–D16 in §33 |
 | [`pigeonnet-milestones.md`](docs/pigeonnet-milestones.md) | What order to build it in, and how to tell a piece is done |
 | [`AGENTS.md`](AGENTS.md) | How to work in this repository. Read before opening a pull request |
 | [`agent-notes.md`](docs/agent-notes.md) | What agents found out the hard way, each with the command that checks it |

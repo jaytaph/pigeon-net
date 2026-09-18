@@ -392,11 +392,14 @@ why it was sized XL and flagged for splitting.
 - Per-device epoch prekeys, signed by a device key holding `publish-prekeys`
   (§8.1). The root key stays cold. Published into the snapshot of M5, which is
   how a sender obtains them.
-- Prekey publication schedule, with lookahead — **an open question, not a
-  parameter** (§37.1). Lookahead is the main control on the compromise window: a
-  leaked backup with a year of it becomes a standing wiretap on the future rather
-  than a window into the past, which contradicts D9's claim that an old leak
-  opens only its own epoch. Four candidate designs are recorded; none adopted.
+- Prekey publication schedule, with lookahead — **decided by D16**, after being
+  the largest open question in the design (§37.1). The question named the wrong
+  quantity: publishing is not what creates exposure, derivability is, and the
+  first implementation let a leaked keystore derive roughly eleven years forward.
+  D16 splits the seed cold and warm so a window bounds it, binds each prekey to
+  its epoch, and moves epochs from daily to weekly. **Not yet implemented** —
+  `PrekeySeed` still has no window, and `MAX_DERIVATION_SPAN` is still doing
+  security policy by accident.
 - Inbox spooling at a carrier, and the authenticated `inbox:` query (D15).
 - Sender **fan-out**: payload encrypted once under a content key, wrapped per
   recipient device.
@@ -604,7 +607,7 @@ This table is only the build-order view of them.
 
 | Question | Closes at |
 |---|---|
-| Epoch length and lookahead versus backup exposure (§37.1) | M6 — the largest open question in the design |
+| ~~Epoch length and lookahead versus backup exposure (§37.1)~~ | **Decided: D16.** Implementation outstanding in M6 |
 | `W` default — 30 days is assumed, not measured | M6, against real sync intervals |
 | Public echo abuse, now also for `NodeProfile` objects (§37.2) | unresolved; blunted in M5, not solved |
 | Cold identity resolution when no path reaches it (§37.3) | M5 — likely documented as a limit rather than fixed |

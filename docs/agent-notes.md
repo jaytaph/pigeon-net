@@ -140,3 +140,24 @@ it changes about how you work.
   no crash — so nothing was hiding behind the broken setup, but that was luck and
   not something the red build could tell anyone.
 - **Status:** open.
+
+## A constant added as a performance guard was setting a security parameter
+- **Found:** 2026-09-18 — answering §37.1, the design's largest open question.
+  The document framed it as "how far ahead should prekeys be published?" and the
+  answer turned out to be that publishing was never the control.
+- **Claim:** `MAX_DERIVATION_SPAN` in `crates/pigeonnet-crypto/src/prekey.rs` was
+  introduced to stop a caller spending an afternoon deriving an epoch a century
+  away — its comment says exactly that, honestly. But `PrekeySeed::keypair` will
+  derive anything within that span, so at 4096 daily epochs a stolen keystore
+  opened about **eleven years** of future traffic. The performance bound was the
+  security bound, and no document said so.
+- **Check:** `grep -n 'MAX_DERIVATION_SPAN' crates/pigeonnet-crypto/src/prekey.rs`
+  and `grep -n 'EPOCH_MILLIS' crates/pigeonnet-node/src/snapshot.rs`. Multiply.
+- **So:** when a limit bounds what an attacker can do, it is policy, and belongs
+  where policy is reviewed — not in a `const` justified by compute cost. D16 moves
+  it into the keystore as a derivation window.
+- **And:** the reframing is the reusable part. Before arguing about a parameter,
+  check it is the quantity that actually controls the risk. Lookahead constrains
+  honest senders; derivability constrains the thief. Cutting lookahead to one
+  epoch would have changed nothing and felt like progress.
+- **Status:** open — D16 is written, the implementation has not landed.

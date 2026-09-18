@@ -483,8 +483,8 @@ DeviceKeyRevoked
 IdentitySuccession        # voidable when root-signed; see 5.5
 ```
 
-It does **not** sign epoch prekeys. Those are published daily by device keys
-holding a `publish-prekeys` capability (section 8.1) — a key used every day is
+It does **not** sign epoch prekeys. Those are published weekly by device keys
+holding a `publish-prekeys` capability (section 8.1) — a key used every week is
 not a cold key.
 
 An identity also has a **recovery key**, which outranks the root and is covered
@@ -741,8 +741,8 @@ be a promise the format cannot keep.
 **Freshness is a property of the snapshot, not a consequence of running out of
 prekeys.** Section 8.1 currently leaks freshness by accident: a sender with a
 stale profile exhausts the prekeys it holds and falls back. That signal
-disappears entirely if lookahead is increased (section 37), so it must not be
-load-bearing. A client displays *"your view of this identity is 41 days old"*
+disappears entirely if lookahead is increased (D16 bounds it, but does not make
+it a reliable signal), so it must not be load-bearing. A client displays *"your view of this identity is 41 days old"*
 rather than silently degrading.
 
 Withholding remains available to a server and is not fixed by any of this: it can
@@ -1055,13 +1055,18 @@ EpochPrekey {
 }
 ```
 
-One epoch per day, published several epochs ahead so a sender always has a
+One epoch per week (D16), published several epochs ahead so a sender always has a
 current one to hand. The sender selects by wall clock rather than by choice,
 which is the property that makes this scale: nothing is consumed, so nothing
 collides and nothing runs out — at ten correspondents or ten thousand.
 
+How far ahead a node may publish is bounded by its **derivation window**, not by
+taste: the warm seed cannot reach past the window its cold half opened, so
+lookahead is capped by the same mechanism that caps what a stolen keystore is
+worth (D16). Crossing into the next window is an offline operation.
+
 **Prekeys are signed by a device key, not by the root key.** A prekey is
-published daily, and a key used daily is not cold; having the root sign them
+published every week, and a key used weekly is not cold; having the root sign them
 would contradict section 5.4's requirement that it live offline. The exposure
 this accepts — a compromised device can publish prekeys whose private half the
 attacker holds — is an ordinary device compromise, already in the threat model
@@ -2536,7 +2541,7 @@ The protocol validates, before accepting an object into trusted state:
 |---|---|
 | Wire capture; hostile or archival relay | epoch prekey expiry (D4) |
 | Seized powered-off device | encryption at rest (D9) |
-| Leaked old key backup | epoch prekey expiry — an old leak opens only its own epoch |
+| Leaked old key backup | epoch prekey expiry backwards; the derivation window forwards (D16) |
 | Forged authorship | device key signatures and delegation chains (D3) |
 | Stolen root key | recovery key eviction, `invalidate_from` (D11) |
 | Unsolicited traffic | contact gate, invitations, quotas (D7) |
@@ -2683,7 +2688,7 @@ v1 of the object format and replication protocol, and records what it supersedes
 earlier in this document. Where a decision contradicts an earlier section, the
 decision wins and the earlier section is scheduled for rewrite.
 
-Decisions are numbered `D1`..`D15` so they can be cited from code and commits.
+Decisions are numbered `D1`..`D16` so they can be cited from code and commits.
 
 ---
 
@@ -2821,8 +2826,9 @@ EpochPrekey {
 }
 ```
 
-- One epoch per day, published several epochs ahead. The sender selects by wall
-  clock, not by choice — nothing is consumed, so nothing collides or runs out.
+- One epoch per week, published several epochs ahead, and never past the current
+  derivation window (D16). The sender selects by wall clock, not by choice —
+  nothing is consumed, so nothing collides or runs out.
 - The recipient destroys the private half at `valid_until`, which is
   `epoch_end + W`. `W` is per-node configuration, thirty days by default, and
   must exceed worst-case replication lag plus worst-case delivery delay.
@@ -3053,6 +3059,10 @@ A node's store is not uniformly sensitive, and is not uniformly encrypted:
 - Key material is encrypted under a passphrase-derived key (Argon2id), always,
   with no opt-out. The root key especially: recovery is undesigned (section 5.4),
   so losing it ends the identity and leaking it ends everything.
+- A backup of the keystore is **as sensitive as the root key**, and should be
+  treated that way rather than swept up by whatever backs up the rest of the
+  node. This is advice, not a mechanism: D16 bounds what a stolen keystore is
+  worth precisely so that the guarantee does not rest on anyone following it.
 - Received direct messages are **re-encrypted on receipt** under a local storage
   key — decrypt once with the epoch prekey, re-encrypt locally, then let the
   epoch key expire on D4's schedule. This is the default, because people expect
@@ -3087,7 +3097,15 @@ Forward secrecy also buys two things local disk encryption cannot:
   replicated copies. Epoch expiry kills the copies you cannot reach.
 - **Old backup leaks.** A years-old backup containing a long-term key, combined
   with an archival node's store, would otherwise be total historical compromise.
-  With epoch keys, an old leak opens only its own epoch.
+  With epoch keys, an old leak opens its own epoch backwards and, forwards, no
+  more than the remainder of the derivation window it was taken in (D16).
+
+  This bullet previously claimed an old leak "opens only its own epoch". That was
+  not true as first built: the warm seed derived forward as far as a compute
+  guard allowed, so a stolen keystore was a standing wiretap rather than a
+  historical one. D16 is what makes the corrected sentence above hold. The
+  distinction is worth keeping visible, because the original claim is the one a
+  reader expects and the one an implementation will drift back toward.
 
 *Extends: 25, 29.*
 
@@ -3403,6 +3421,81 @@ prekeys, and senders fan out to all of them (section 8.1).
 
 ---
 
+## D16. Prekey derivation is windowed: a cold half bounds how far the warm seed reaches
+
+**Decision**
+
+- An epoch prekey secret is derived from a **warm seed** held on the node and a
+  **cold half** held offline, like the root key. Neither alone derives anything.
+- The warm seed carries a **window end** alongside its current epoch. Deriving an
+  epoch at or beyond that end fails. The window is policy, stored in the
+  keystore, not a compute guard.
+- Crossing into the next window is a deliberate offline operation with the cold
+  half, on roughly a quarterly schedule.
+- Each `EpochPrekey` **names its epoch in the signed object**, and a sender may
+  only seal to an epoch that is current when it seals. Retention is then bounded
+  by the epoch plus the delivery window, and a node can answer "what must I still
+  hold?" without guessing.
+- Epochs are **weekly**, not daily.
+- A node that has not crossed into the current window cannot derive a live secret
+  and falls back to `fs: none` (section 8.1). It degrades; it does not break.
+
+**Supersedes:** the provisional leaning in section 37.1 — "4 immediately, 2 in
+v1, 1 or 3 only if measurement or threat model demands it" — which was reasoning
+about the wrong quantity. It also corrects D9's claim that an old leak opens only
+its own epoch.
+
+**Rationale**
+
+Section 37.1 asked how far ahead prekeys should be published, and treated
+lookahead as the control on the compromise window. It is not. Publishing is not
+what creates exposure; **derivability** is. A thief holding the seed derives the
+keys whether or not they were ever published, so capping lookahead constrains
+honest senders and not the thief.
+
+The first implementation made this concrete. `PrekeySeed` derives any epoch from
+its current one up to `MAX_DERIVATION_SPAN`, a constant introduced — candidly, in
+its own comment — as a bound rather than a policy, so that a caller asking for an
+epoch a century away would not spend the afternoon on it. At 4096 daily epochs it
+quietly set the security parameter instead: a leaked `keys.bin` opened roughly
+**eleven years** of future traffic, written by people with no reason to suspect
+anything. That is a standing wiretap, and it is worse than the worst case
+section 37.1 described.
+
+The ratcheting seed stays, but it answers the opposite question. A one-way
+ratchet gives *backward* secrecy — destroying an epoch is a step forward rather
+than a file deletion the filesystem may have quietly copied three times. It does
+nothing in the forward direction, and reading it as partial progress here would
+be a mistake.
+
+Of the four candidates, only the cold/warm split bounds forward derivation.
+Binding each key to its epoch is a cheap complement: it bounds retention and stops
+a key sealing outside its window. Excluding key material from backups was
+attractive because it is free, but it trades a guarantee that holds regardless of
+operator care for a habit that fails silently when it lapses; it is stated as
+advice in D9 rather than relied on as the mechanism.
+
+**Cost, stated plainly**
+
+A quarterly ritual with cold material. The strongest argument against this
+decision is that a ritual nobody performs leaves everyone on `fs: none`, which is
+a worse outcome than a bounded wiretap nobody suffers. The answer is that the
+failure is loud, local and reversible — the node reports it and the operator
+performs the step late — whereas the failure it replaces is silent, remote and
+permanent. A guarantee that depends on an operator noticing is still worth more
+than one that depends on an attacker never getting a backup.
+
+Weekly rather than daily epochs is folded in here because it is cheapest before a
+second identity exists: the epoch number is how time is addressed, so changing
+its length later is a format break. Worst-case message lifetime moves from 31 to
+37 days, which nobody notices, and the liveness leak from publishing every day
+disappears.
+
+*Extends: 8.1, 37.1. Corrects: D9.*
+
+---
+
+
 # 34. Rust Implementation
 
 The implementation language is Rust, edition 2024.
@@ -3563,43 +3656,46 @@ That rule should guide protocol and implementation decisions throughout the expe
 Unlike section 33, nothing here is decided. These are known gaps, recorded so
 they are not rediscovered.
 
-## 37.1 Epoch length and lookahead versus backup exposure
+## 37.1 Epoch length and lookahead versus backup exposure — **resolved by D16**
 
-Weekly epochs instead of daily look clearly better: worst-case message lifetime
-moves from 31 to 37 days, which nobody notices, and publishing becomes
-infrequent enough that the daily-publication liveness leak disappears.
+This was the largest open question in the design. It is answered, and the answer
+turned out to be that the question named the wrong quantity.
 
-**Lookahead is the unresolved part, and it is the main control on the compromise
-window — not a convenience parameter.** Publishing far ahead makes offline-first
-work: a node that has not synced in months never runs its correspondents dry and
-never forces them onto `fs: none`. But the private halves must be retained, so a
-leaked backup stops being a window into the past and becomes a **standing
-wiretap on the future**: a June backup with a year of lookahead decrypts traffic
-through December, written by people who have no idea anything happened. That
-directly contradicts D9's claim that an old leak opens only its own epoch.
+**What was asked.** Weekly epochs beat daily: worst-case message lifetime moves
+from 31 to 37 days, which nobody notices, and publishing becomes infrequent
+enough that the daily-publication liveness leak disappears. Lookahead was the
+unresolved part, and was described as the main control on the compromise window —
+publish far ahead and offline-first works, but the private halves must be
+retained, so a leaked backup stops being a window into the past and becomes a
+standing wiretap on the future.
 
-Candidates, none adopted:
+**Why that framing was wrong.** Publishing is not what creates the exposure.
+**Derivability** is. Someone holding the seed derives an epoch's key whether or
+not it was ever published, so a lookahead cap constrains honest senders and not
+the thief. Building it made this unmissable: the first `PrekeySeed` would derive
+any epoch up to `MAX_DERIVATION_SPAN` ahead — a constant introduced as a compute
+guard, in a comment that said so, which at daily epochs silently set the security
+parameter to about eleven years.
+
+**What was decided.** D16: a cold half bounds how far the warm seed reaches, each
+prekey names its epoch and may only be sealed to while current, and epochs become
+weekly. A leaked node backup opens the remainder of one window rather than a
+decade. The four candidates below are kept because the reasoning over them is
+what produced the decision, and because two of them survive inside it.
 
 1. **Bind the epoch to the calendar.** A week-30 public key may only *seal*
-   during week 30, recorded in the object. A stolen backup then yields only
-   live-week traffic, which is ordinary device compromise. Needs a generous
-   delivery window afterwards, or store-and-forward breaks.
+   during week 30, recorded in the object. **Adopted**, as the complement that
+   bounds retention.
 2. **Derive private halves from a seed** rather than storing them, and ratchet
-   the seed forward. Shrinks nothing by itself, but makes destruction coherent —
-   there is no file the filesystem may have copied three times — and makes the
-   others cheap.
-3. **Split the seed, cold and warm.** The private key needs both halves; the
-   warm half lives on the node, the cold half is advanced on a quarterly
-   schedule. A leaked backup then exposes one quarter. Strongest guarantee,
-   most friction.
-4. **Exclude key material from node backups entirely**, by default. Not
-   cryptography, free, and it removes the stated scenario rather than shrinking
-   it.
-
-Provisional leaning: 4 immediately, 2 in v1 so the seed structure does not need
-a format break later, 1 or 3 only if measurement or threat model demands it.
-Lookahead defaults to roughly a quarter, configurable, with the exposure stated
-in the documentation rather than buried.
+   the seed forward. **Already built, and it answers a different question** — a
+   one-way ratchet gives backward secrecy, making destruction coherent. It does
+   nothing forward.
+3. **Split the seed, cold and warm.** **Adopted.** The only candidate that bounds
+   forward derivation, and the reason the guarantee now holds regardless of how
+   careful the operator is.
+4. **Exclude key material from node backups entirely.** **Rejected as the
+   mechanism**, kept as advice in D9. Free, but it trades a guarantee for a habit
+   that fails silently when it lapses.
 
 ## 37.2 Public echo abuse
 
