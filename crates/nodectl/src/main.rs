@@ -73,6 +73,11 @@ enum Command {
         area: String,
         /// What to say.
         content: String,
+        /// Claim a different creation time: `-3d`, `-90m`, `+2h`, or raw
+        /// milliseconds. Useful for seeding; see the note in `--help`.
+        // `allow_hyphen_values`, or clap reads `-3d` as an unknown flag.
+        #[arg(long, value_name = "WHEN", allow_hyphen_values = true)]
+        at: Option<String>,
     },
 
     /// Send a private message (§8).
@@ -120,6 +125,10 @@ enum Command {
         parent: String,
         /// What to say.
         content: String,
+        /// Claim a different creation time. Same format as `post --at`.
+        // `allow_hyphen_values`, or clap reads `-3d` as an unknown flag.
+        #[arg(long, value_name = "WHEN", allow_hyphen_values = true)]
+        at: Option<String>,
     },
 }
 
@@ -202,6 +211,14 @@ enum IdentityCommand {
         /// A local label. Not published, and not part of the identity.
         #[arg(long)]
         name: Option<String>,
+        /// Date the identity earlier, so posts can be backdated into its
+        /// lifetime: `-60d`, or raw milliseconds.
+        ///
+        /// A device key cannot sign objects from before it was granted, so an
+        /// identity created today can never hold a post dated last week. This is
+        /// for seeding a node with plausible history; it has no other use.
+        #[arg(long, value_name = "WHEN", allow_hyphen_values = true)]
+        at: Option<String>,
     },
     /// Show this node's identity and key state.
     Show,
@@ -239,8 +256,8 @@ fn main() -> Result<()> {
     let node = Node::open(&home).with_context(|| format!("opening node at {}", home.display()))?;
 
     match cli.command {
-        Command::Identity(IdentityCommand::Create { name }) => {
-            create_identity(&node, name.as_deref())
+        Command::Identity(IdentityCommand::Create { name, at }) => {
+            create_identity(&node, name.as_deref(), resolve_when(at.as_deref())?)
         }
         Command::Identity(IdentityCommand::Show) => show_identity(&node),
         Command::Object(ObjectCommand::Show { id }) => show_object(&node, &id),
@@ -265,10 +282,10 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Echo(EchoCommand::Read { area }) => read_area(&node, &parse_area(&area)?),
-        Command::Post { area, content } => {
-            let id = node.post(&parse_area(&area)?, &content, &passphrase()?, now_millis()?)?;
-            println!("created  {id}");
-            println!("queued   for subscribed peers");
+        Command::Post { area, content, at } => {
+            let when = resolve_when(at.as_deref())?;
+            let id = node.post(&parse_area(&area)?, &content, &passphrase()?, when)?;
+            report_created(id, at.is_some(), when);
             Ok(())
         }
         Command::Peer(PeerCommand::Add { address, expect }) => {
@@ -363,11 +380,15 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Reply { parent, content } => {
+        Command::Reply {
+            parent,
+            content,
+            at,
+        } => {
             let parent = ObjectId::parse(&parent).map_err(|e| anyhow::anyhow!("{e}"))?;
-            let id = node.reply(parent, &content, &passphrase()?, now_millis()?)?;
-            println!("created  {id}");
-            println!("queued   for subscribed peers");
+            let when = resolve_when(at.as_deref())?;
+            let id = node.reply(parent, &content, &passphrase()?, when)?;
+            report_created(id, at.is_some(), when);
             Ok(())
         }
     }
@@ -405,9 +426,9 @@ fn now_millis() -> Result<i64> {
     i64::try_from(millis).context("system clock is implausibly far in the future")
 }
 
-fn create_identity(node: &Node, name: Option<&str>) -> Result<()> {
+fn create_identity(node: &Node, name: Option<&str>, when: i64) -> Result<()> {
     let passphrase = passphrase()?;
-    let created = node.create_identity(&passphrase, now_millis()?)?;
+    let created = node.create_identity(&passphrase, when)?;
 
     println!("Generating root key      ed25519 ........ ok");
     println!("Generating recovery key  ed25519 ........ ok");
@@ -438,6 +459,12 @@ fn create_identity(node: &Node, name: Option<&str>) -> Result<()> {
     println!("     Not stored on this machine. Will not be shown again.");
     println!("     Without it, a lost or stolen root key ends this identity.");
     println!();
+    if when < now_millis()? - 60_000 {
+        println!(
+            "  dated        {}  (claimed, not proven)",
+            render::iso8601(when)
+        );
+    }
     println!("  genesis      {}", created.genesis);
     println!("  device grant {}", created.device_grant);
     Ok(())
@@ -832,4 +859,23 @@ fn who(node: &Node, identity: pigeonnet_core::IdentityId, now: i64) -> String {
         },
         Err(_) => identity.to_string(),
     }
+}
+
+/// Resolve an optional `--at` into a timestamp, defaulting to now.
+fn resolve_when(at: Option<&str>) -> Result<i64> {
+    let now = now_millis()?;
+    match at {
+        None => Ok(now),
+        Some(text) => render::parse_when(text, now).map_err(|e| anyhow::anyhow!("{e}")),
+    }
+}
+
+fn report_created(id: pigeonnet_core::ObjectId, backdated: bool, when: i64) {
+    println!("created  {id}");
+    if backdated {
+        // Stated, not buried. The timestamp is what the author claims, and a
+        // reader has no way to check it.
+        println!("dated    {}  (claimed, not proven)", render::iso8601(when));
+    }
+    println!("queued   for subscribed peers");
 }
