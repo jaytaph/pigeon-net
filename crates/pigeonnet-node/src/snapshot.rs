@@ -109,10 +109,14 @@ impl Node {
 
 /// One epoch, in milliseconds (§8.1).
 ///
-/// Daily, as D4 specifies. §37.1 argues weekly is better and treats *lookahead*
-/// as the real open question, since it controls how far a leaked backup reaches
-/// into the future. Neither is settled, so this stays where the decision put it.
-pub const EPOCH_MILLIS: i64 = 86_400_000;
+/// Weekly, as D16 settles. Daily was D4's original figure; weekly moves the
+/// worst-case message lifetime from 31 days to 37, which nobody notices, and
+/// stops a node announcing its liveness every single day by publishing.
+///
+/// This is how time is addressed: an epoch number means nothing without it, so
+/// changing it renumbers every prekey ever published. D16 makes the change now,
+/// while that costs nothing.
+pub const EPOCH_MILLIS: i64 = 604_800_000;
 
 /// How long a private half survives past its epoch (`W` in D4).
 pub const RETENTION_MILLIS: i64 = 30 * 86_400_000;
