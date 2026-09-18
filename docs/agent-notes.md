@@ -101,3 +101,21 @@ it changes about how you work.
 - **So:** run one at a time. If you cancel a run, confirm its `cargo` actually
   died — an orphan reparents to systemd and keeps competing for the lock.
 - **Status:** open.
+
+## `git add <file>` does not mean only that file is staged
+- **Found:** 2026-09-18 — splitting a documentation change into two commits. The
+  first was meant to hold `README.md` alone; it took two other files with it,
+  because they had been staged earlier in the session and forgotten.
+- **Claim:** the index persists across commands. Staging one file does not unstage
+  anything else, so a commit contains whatever has accumulated — and `git commit`
+  reports nothing about it unless you look.
+- **Check:** `git diff --cached --name-only` immediately before `git commit`. Read
+  it against what the commit message claims.
+- **So:** run that check every time. It also catches the opposite failure — a new
+  file never staged at all, which is how a milestone commit here ended up not
+  building. The build check does not catch the first case: a commit with extra
+  files in it still compiles.
+- **Note:** `git status --short` is a weaker check for this. It shows staged and
+  unstaged together in two columns, and a file already committed earlier in the
+  session simply does not appear, which reads as "nothing extra is staged".
+- **Status:** promoted to `AGENTS.md`.

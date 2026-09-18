@@ -66,6 +66,20 @@ gate.
 
 ## Verifying your own work
 
+**Look at what is staged before every commit.** Not what you meant to stage —
+what is actually there:
+
+```bash
+git diff --cached --name-only
+```
+
+The index carries things forward. A file staged earlier and forgotten rides along
+into the next commit, and a new file never staged is silently absent. Both have
+happened here: a milestone commit that did not build because five new files were
+missing, and a docs commit that swallowed two files belonging to the one after it.
+This check costs a second and catches both, which the build check below does not —
+a commit with extra files in it still builds.
+
 **Every commit must build on its own.** Not just the branch tip. One milestone
 commit here did not, because five new files were never staged, and it was only
 found much later. Check it:
