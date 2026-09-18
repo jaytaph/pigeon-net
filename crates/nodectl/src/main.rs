@@ -515,6 +515,20 @@ fn show_identity(node: &Node) -> Result<()> {
     }
     out!();
     out!("objects held  {}", node.store().len()?);
+
+    // A keystore sealed with test parameters is readable by anyone holding the
+    // file. Nothing else about a node would ever mention it, so it is said here.
+    let params = node.keystore_params()?;
+    if !params.is_production() {
+        out!();
+        out!(
+            "\u{26a0}  keystore sealed with WEAK parameters ({} KiB, {} iterations).",
+            params.memory_kib,
+            params.iterations
+        );
+        out!("   Guessing this passphrase is cheap. Do not use this identity for");
+        out!("   anything that matters.");
+    }
     Ok(())
 }
 

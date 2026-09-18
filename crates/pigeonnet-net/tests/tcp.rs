@@ -27,7 +27,8 @@ fn temp_node(tag: &str) -> (Temp, Node) {
     getrandom::fill(&mut seed).unwrap();
     let mut path = std::env::temp_dir();
     path.push(format!("pigeonnet-net-{tag}-{}", u64::from_le_bytes(seed)));
-    let node = Node::open(&path).unwrap();
+    let node =
+        Node::open_with_kdf(&path, pigeonnet_crypto::KdfParams::insecure_for_tests()).unwrap();
     (Temp(path), node)
 }
 
@@ -114,7 +115,8 @@ async fn cursors_survive_reopening_the_node() {
     pull(&a, NODE_A, &b, NODE_B, Limits::DEFAULT).await.unwrap();
     drop(a);
 
-    let reopened = Node::open(&a_dir.0).unwrap();
+    let reopened =
+        Node::open_with_kdf(&a_dir.0, pigeonnet_crypto::KdfParams::insecure_for_tests()).unwrap();
     assert_eq!(
         pull(&reopened, NODE_A, &b, NODE_B, Limits::DEFAULT)
             .await

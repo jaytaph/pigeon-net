@@ -29,7 +29,8 @@ fn node(tag: &str) -> (Temp, Node, NodeId) {
     getrandom::fill(&mut seed).unwrap();
     let mut path = std::env::temp_dir();
     path.push(format!("pigeonnet-msg-{tag}-{}", u64::from_le_bytes(seed)));
-    let node = Node::open(&path).unwrap();
+    let node =
+        Node::open_with_kdf(&path, pigeonnet_crypto::KdfParams::insecure_for_tests()).unwrap();
     node.create_identity(PASS, NOW).unwrap();
     node.publish_prekeys(PASS, NOW, 7).unwrap();
     let id = node.node_id(PASS).unwrap();

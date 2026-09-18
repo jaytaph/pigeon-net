@@ -3059,6 +3059,16 @@ A node's store is not uniformly sensitive, and is not uniformly encrypted:
 - Key material is encrypted under a passphrase-derived key (Argon2id), always,
   with no opt-out. The root key especially: recovery is undesigned (section 5.4),
   so losing it ends the identity and leaking it ends everything.
+- **The keystore records its own cost parameters**, authenticated alongside the
+  salt and nonce. A file therefore says how it was sealed, and any build can open
+  any file. Without this the parameters were compile-time constants, which meant
+  the production cost could never be raised without orphaning every keystore in
+  existence, and a build that lowered it — a test suite, say — produced files the
+  real binary could not read. Editing the recorded cost changes the derived key
+  and fails the tag, so there is no downgrade to defend against.
+- A keystore may be sealed at a cost that offers no real resistance, for tests
+  that would otherwise spend their runtime in Argon2. The tooling **says so
+  whenever it opens one**, because nothing else about a node would reveal it.
 - A backup of the keystore is **as sensitive as the root key**, and should be
   treated that way rather than swept up by whatever backs up the rest of the
   node. This is advice, not a mechanism: D16 bounds what a stolen keystore is

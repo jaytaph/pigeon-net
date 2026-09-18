@@ -278,7 +278,7 @@ impl Node {
 
         // Until this is written the destruction exists only in memory, which is
         // no destruction at all.
-        let sealed = keyring.seal(passphrase)?;
+        let sealed = keyring.seal_with(passphrase, self.kdf)?;
         crate::write_private(&self.keystore_path(), &sealed)?;
         Ok(destroyed)
     }

@@ -30,7 +30,8 @@ fn node(tag: &str) -> (Temp, Node, NodeId) {
     getrandom::fill(&mut seed).unwrap();
     let mut path = std::env::temp_dir();
     path.push(format!("pigeonnet-echo-{tag}-{}", u64::from_le_bytes(seed)));
-    let node = Node::open(&path).unwrap();
+    let node =
+        Node::open_with_kdf(&path, pigeonnet_crypto::KdfParams::insecure_for_tests()).unwrap();
     node.create_identity(PASS, NOW).unwrap();
     let id = node.node_id(PASS).unwrap();
     (Temp(path), node, id)

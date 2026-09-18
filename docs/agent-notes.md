@@ -161,3 +161,26 @@ it changes about how you work.
   honest senders; derivability constrains the thief. Cutting lookahead to one
   epoch would have changed nothing and felt like progress.
 - **Status:** open — D16 is written, the implementation has not landed.
+
+## A crypto parameter that is a compile-time constant is part of the build, not the file
+- **Found:** 2026-09-18 — trying to make the suite faster. At production cost one
+  Argon2 derive takes ~1.7 s in a debug build, and the suite opens keystores
+  hundreds of times; `tests/messages.rs` alone took 73 s locally and 95 s in CI.
+- **Claim:** the obvious fixes — a cargo feature, `cfg(test)`, `cfg(debug_assertions)`
+  — are all wrong here, and not only for the usual reason that a feature can be
+  enabled by any crate in the graph. The keystore did not record its cost, so the
+  parameters were effectively part of the file format: a build that used different
+  ones produced files no other build could open. Lowering the cost for tests would
+  have made test keystores unreadable by the real binary, and raising the
+  production cost later would have orphaned every keystore in existence.
+- **Check:** `Keyring::params_of` on a v2 file, and the version byte at offset 8.
+- **So:** record the parameters in the file, authenticated. Then any build opens
+  any file, the default can move later, and tests pass an explicit cheap cost.
+  Sealing takes the cost as an argument; only `KdfParams::insecure_for_tests()`
+  is weak, and it is a function with an unpleasant name so every use shows in a
+  diff. Result: 73 s to 4 s, with no way to reach it by accident.
+- **And:** bumping a format version breaks whoever is already running it. Three
+  live nodes had v2 keystores, one of them serving publicly, and identities
+  cannot be recreated because recovery is not built (D11, M8). Reading the old
+  version is a few lines; check for existing files before assuming a clean break.
+- **Status:** open.

@@ -154,18 +154,44 @@ pub struct Node {
     root: PathBuf,
     store: ObjectStore,
     limits: pigeonnet_proto::Limits,
+    /// Cost used when *sealing* the keystore. Opening reads the cost from the
+    /// file, so this never limits what this node can read.
+    kdf: pigeonnet_crypto::KdfParams,
 }
 
 impl Node {
     /// Open or create a node directory.
     pub fn open(root: &Path) -> Result<Self, NodeError> {
+        Self::open_with_kdf(root, pigeonnet_crypto::KdfParams::PRODUCTION)
+    }
+
+    /// Open or create a node directory, sealing its keystore at a chosen cost.
+    ///
+    /// Exists for tests, which otherwise spend their entire runtime in Argon2 —
+    /// about 1.7 seconds per derive in a debug build, several times per test.
+    /// The cost is written into the keystore, so a node opened this way still
+    /// produces files any other build can read; what it produces is a keystore
+    /// that is **cheap to attack**, which is why the only sanctioned argument
+    /// for anything but production is
+    /// [`KdfParams::insecure_for_tests`](pigeonnet_crypto::KdfParams::insecure_for_tests).
+    pub fn open_with_kdf(root: &Path, kdf: pigeonnet_crypto::KdfParams) -> Result<Self, NodeError> {
         fs::create_dir_all(root)?;
         let store = ObjectStore::open(&root.join("objects.db"))?;
         Ok(Self {
             root: root.to_path_buf(),
             store,
             limits: pigeonnet_proto::Limits::DEFAULT,
+            kdf,
         })
+    }
+
+    /// The cost this node's keystore is sealed at, read from the file.
+    ///
+    /// Worth surfacing: a keystore sealed for a test is trivial to attack, and
+    /// nothing else about the node would ever say so.
+    pub fn keystore_params(&self) -> Result<pigeonnet_crypto::KdfParams, NodeError> {
+        let sealed = fs::read(self.keystore_path())?;
+        Ok(pigeonnet_crypto::Keyring::params_of(&sealed)?)
     }
 
     /// The object store.
@@ -280,7 +306,7 @@ impl Node {
         // produce a prekey for last week even if asked.
         let prekeys = pigeonnet_crypto::PrekeySeed::generate(Self::epoch_at(now))?;
         let keyring = Keyring::new(&root_key, &device_key, &agreement_key, &prekeys);
-        let sealed = keyring.seal(passphrase)?;
+        let sealed = keyring.seal_with(passphrase, self.kdf)?;
         write_private(&self.keystore_path(), &sealed)?;
 
         {

@@ -8,15 +8,31 @@
 //! File layout, all little-endian:
 //!
 //! ```text
-//! magic    8 bytes   "PGNKEY\0\0"
-//! version  1 byte
-//! salt    16 bytes   Argon2id salt
-//! nonce   12 bytes   ChaCha20-Poly1305 nonce
+//! magic        8 bytes   "PGNKEY\0\0"
+//! version      1 byte
+//! memory_kib   4 bytes   Argon2id cost parameters
+//! iterations   4 bytes
+//! parallelism  4 bytes
+//! salt        16 bytes   Argon2id salt
+//! nonce       12 bytes   ChaCha20-Poly1305 nonce
 //! ciphertext + 16-byte tag
 //! ```
 //!
-//! The header is authenticated as associated data, so salt and nonce cannot be
+//! The header is authenticated as associated data, so nothing in it can be
 //! swapped for another file's without the tag failing.
+//!
+//! # Why the cost parameters are in the file
+//!
+//! They used to be compile-time constants, which quietly made every keystore
+//! readable only by a build that agreed with it. Two consequences, both bad: the
+//! production parameters could never be raised without orphaning every existing
+//! file, and tests had no way to use cheap ones without producing keystores the
+//! real binary could not open.
+//!
+//! Recording them costs twelve bytes and removes both problems. A file says how
+//! it was sealed and anyone can open it. There is no downgrade to worry about:
+//! the parameters are authenticated, and editing them yields a different key and
+//! a failed tag.
 
 use chacha20poly1305::{
     ChaCha20Poly1305, KeyInit,
@@ -29,19 +45,72 @@ use zeroize::Zeroizing;
 use crate::{AgreementKeypair, CryptoError, SigningKeypair};
 
 const MAGIC: &[u8; 8] = b"PGNKEY\0\0";
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
-const HEADER_LEN: usize = MAGIC.len() + 1 + SALT_LEN + NONCE_LEN;
+const COST_LEN: usize = 12;
+const HEADER_LEN: usize = MAGIC.len() + 1 + COST_LEN + SALT_LEN + NONCE_LEN;
 
-/// Argon2id cost parameters.
+/// The format before the cost parameters were recorded.
 ///
-/// 64 MiB and three passes: enough that guessing a passphrase against a stolen
-/// file is expensive, while a legitimate unlock stays under a second on the
-/// Raspberry Pi-class hardware this system claims to run on (§1).
-const MEMORY_KIB: u32 = 65_536;
-const ITERATIONS: u32 = 3;
-const PARALLELISM: u32 = 1;
+/// Version 2 keystores exist on real machines, including a node serving on a
+/// public address, so they are still opened. They are read with the cost that
+/// was compiled in at the time — which is what they were sealed with, because
+/// there was no other option — and re-sealed as version 3 the next time anything
+/// writes them.
+const VERSION_V2: u8 = 2;
+const HEADER_LEN_V2: usize = MAGIC.len() + 1 + SALT_LEN + NONCE_LEN;
+
+/// Argon2id cost parameters, as recorded in a keystore.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KdfParams {
+    /// Memory cost, in kibibytes.
+    pub memory_kib: u32,
+    /// Number of passes.
+    pub iterations: u32,
+    /// Lanes. One, unless there is a reason.
+    pub parallelism: u32,
+}
+
+impl KdfParams {
+    /// What a real keystore is sealed with.
+    ///
+    /// 64 MiB and three passes: enough that guessing a passphrase against a
+    /// stolen file is expensive, while a legitimate unlock stays under a second
+    /// on the Raspberry Pi-class hardware this system claims to run on (§1).
+    pub const PRODUCTION: Self = Self {
+        memory_kib: 65_536,
+        iterations: 3,
+        parallelism: 1,
+    };
+
+    /// Cost parameters that provide **no meaningful resistance**, for tests.
+    ///
+    /// At production cost a single derive takes about 1.7 seconds in a debug
+    /// build, and the suite opens keystores hundreds of times; this turns that
+    /// into well under a millisecond. The name is deliberately unpleasant, and it
+    /// is a function rather than a constant, so that every use is visible in a
+    /// diff and none of them can be reached by accident or by a feature flag
+    /// somebody else enabled.
+    ///
+    /// A keystore sealed with these is readable by anyone who has the file. Never
+    /// use it for an identity that matters.
+    #[must_use]
+    pub const fn insecure_for_tests() -> Self {
+        Self {
+            memory_kib: 8,
+            iterations: 1,
+            parallelism: 1,
+        }
+    }
+
+    /// Whether these are the parameters a real keystore should have.
+    #[must_use]
+    pub const fn is_production(self) -> bool {
+        self.memory_kib >= Self::PRODUCTION.memory_kib
+            && self.iterations >= Self::PRODUCTION.iterations
+    }
+}
 
 /// The private half of an identity, as held on one node.
 ///
@@ -129,8 +198,16 @@ impl Keyring {
         self.prekey_epoch = prekeys.epoch();
     }
 
-    /// Seal under a passphrase.
+    /// Seal under a passphrase, at production cost.
     pub fn seal(&self, passphrase: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        self.seal_with(passphrase, KdfParams::PRODUCTION)
+    }
+
+    /// Seal under a passphrase at a chosen cost.
+    ///
+    /// The cost is recorded in the file, so whatever is chosen here does not
+    /// limit who can open the result.
+    pub fn seal_with(&self, passphrase: &[u8], params: KdfParams) -> Result<Vec<u8>, CryptoError> {
         let mut salt = [0u8; SALT_LEN];
         let mut nonce = [0u8; NONCE_LEN];
         getrandom::fill(&mut salt).map_err(|_| CryptoError::Entropy)?;
@@ -139,11 +216,14 @@ impl Keyring {
         let mut header = Vec::with_capacity(HEADER_LEN);
         header.extend_from_slice(MAGIC);
         header.push(VERSION);
+        header.extend_from_slice(&params.memory_kib.to_le_bytes());
+        header.extend_from_slice(&params.iterations.to_le_bytes());
+        header.extend_from_slice(&params.parallelism.to_le_bytes());
         header.extend_from_slice(&salt);
         header.extend_from_slice(&nonce);
 
         let plaintext = Zeroizing::new(cbor::to_canonical_vec(self)?);
-        let key = derive_key(passphrase, &salt)?;
+        let key = derive_key(passphrase, &salt, params)?;
         let cipher = ChaCha20Poly1305::new((&*key).into());
         let ciphertext = cipher
             .encrypt(
@@ -160,30 +240,80 @@ impl Keyring {
         Ok(out)
     }
 
-    /// Open a sealed keystore.
-    pub fn open(sealed: &[u8], passphrase: &[u8]) -> Result<Self, CryptoError> {
+    /// Open a sealed keystore, and report the cost it was sealed at.
+    pub fn open_with_params(
+        sealed: &[u8],
+        passphrase: &[u8],
+    ) -> Result<(Self, KdfParams), CryptoError> {
+        let params = Self::params_of(sealed)?;
+        Ok((Self::open(sealed, passphrase)?, params))
+    }
+
+    /// The header length and cost of a sealed keystore, by version.
+    fn layout(sealed: &[u8]) -> Result<(usize, KdfParams), CryptoError> {
+        if sealed.get(..MAGIC.len()) != Some(MAGIC.as_slice()) {
+            return Err(CryptoError::KeystoreFormat);
+        }
+        match sealed.get(MAGIC.len()) {
+            Some(&VERSION) => Ok((HEADER_LEN, Self::params_of(sealed)?)),
+            // Version 2 predates recorded costs; it was always production.
+            Some(&VERSION_V2) => Ok((HEADER_LEN_V2, KdfParams::PRODUCTION)),
+            _ => Err(CryptoError::KeystoreFormat),
+        }
+    }
+
+    /// The cost parameters a sealed keystore records, without opening it.
+    pub fn params_of(sealed: &[u8]) -> Result<KdfParams, CryptoError> {
+        if sealed.get(MAGIC.len()) == Some(&VERSION_V2) {
+            return Ok(KdfParams::PRODUCTION);
+        }
         let header = sealed
             .get(..HEADER_LEN)
             .ok_or(CryptoError::KeystoreFormat)?;
-        let body = sealed
-            .get(HEADER_LEN..)
-            .ok_or(CryptoError::KeystoreFormat)?;
-
         if header.get(..MAGIC.len()) != Some(MAGIC.as_slice()) {
             return Err(CryptoError::KeystoreFormat);
         }
         if header.get(MAGIC.len()) != Some(&VERSION) {
             return Err(CryptoError::KeystoreFormat);
         }
+        let at = |offset: usize| -> Result<u32, CryptoError> {
+            header
+                .get(offset..offset + 4)
+                .and_then(|b| b.try_into().ok())
+                .map(u32::from_le_bytes)
+                .ok_or(CryptoError::KeystoreFormat)
+        };
+        let base = MAGIC.len() + 1;
+        Ok(KdfParams {
+            memory_kib: at(base)?,
+            iterations: at(base + 4)?,
+            parallelism: at(base + 8)?,
+        })
+    }
+
+    /// Open a sealed keystore, of any supported version.
+    pub fn open(sealed: &[u8], passphrase: &[u8]) -> Result<Self, CryptoError> {
+        // The cost is taken from the file, not from a constant here: that is what
+        // lets a keystore outlive a change to the default, and what lets a test
+        // seal cheaply without producing something the real binary cannot open.
+        let (header_len, params) = Self::layout(sealed)?;
+        let header = sealed
+            .get(..header_len)
+            .ok_or(CryptoError::KeystoreFormat)?;
+        let body = sealed
+            .get(header_len..)
+            .ok_or(CryptoError::KeystoreFormat)?;
+
+        let salt_at = header_len - SALT_LEN - NONCE_LEN;
         let salt = header
-            .get(MAGIC.len() + 1..MAGIC.len() + 1 + SALT_LEN)
+            .get(salt_at..salt_at + SALT_LEN)
             .ok_or(CryptoError::KeystoreFormat)?;
         let nonce: [u8; NONCE_LEN] = header
-            .get(MAGIC.len() + 1 + SALT_LEN..)
+            .get(salt_at + SALT_LEN..)
             .and_then(|n| n.try_into().ok())
             .ok_or(CryptoError::KeystoreFormat)?;
 
-        let key = derive_key(passphrase, salt)?;
+        let key = derive_key(passphrase, salt, params)?;
         let cipher = ChaCha20Poly1305::new((&*key).into());
         let plaintext = Zeroizing::new(
             cipher
@@ -224,8 +354,12 @@ impl Drop for Keyring {
 }
 
 /// Derive the storage key from a passphrase.
-fn derive_key(passphrase: &[u8], salt: &[u8]) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
-    let params = argon2::Params::new(MEMORY_KIB, ITERATIONS, PARALLELISM, Some(32))
+fn derive_key(
+    passphrase: &[u8],
+    salt: &[u8],
+    cost: KdfParams,
+) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
+    let params = argon2::Params::new(cost.memory_kib, cost.iterations, cost.parallelism, Some(32))
         .map_err(|_| CryptoError::KeystoreFormat)?;
     let argon2 = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
     let mut key = Zeroizing::new([0u8; 32]);
@@ -239,6 +373,14 @@ fn derive_key(passphrase: &[u8], salt: &[u8]) -> Result<Zeroizing<[u8; 32]>, Cry
 mod tests {
     use super::*;
 
+    impl Keyring {
+        /// Seal at a cost that keeps the suite usable. See the tests below for
+        /// what guarantees this does and does not preserve.
+        fn seal_with_test(&self, passphrase: &[u8]) -> Result<Vec<u8>, CryptoError> {
+            self.seal_with(passphrase, KdfParams::insecure_for_tests())
+        }
+    }
+
     fn keyring() -> Keyring {
         Keyring::new(
             &SigningKeypair::generate().unwrap(),
@@ -248,11 +390,138 @@ mod tests {
         )
     }
 
+    /// Seal in the version 2 layout: no recorded cost, always production.
+    ///
+    /// Reproduces the old writer exactly, so the compatibility test below is
+    /// checking the real thing rather than a reimplementation that drifted.
+    fn seal_v2(keyring: &Keyring, passphrase: &[u8]) -> Vec<u8> {
+        let mut salt = [0u8; SALT_LEN];
+        let mut nonce = [0u8; NONCE_LEN];
+        getrandom::fill(&mut salt).unwrap();
+        getrandom::fill(&mut nonce).unwrap();
+
+        let mut header = Vec::new();
+        header.extend_from_slice(MAGIC);
+        header.push(VERSION_V2);
+        header.extend_from_slice(&salt);
+        header.extend_from_slice(&nonce);
+
+        let plaintext = cbor::to_canonical_vec(keyring).unwrap();
+        let key = derive_key(passphrase, &salt, KdfParams::PRODUCTION).unwrap();
+        let cipher = ChaCha20Poly1305::new((&*key).into());
+        let ciphertext = cipher
+            .encrypt(
+                (&nonce).into(),
+                AeadPayload {
+                    msg: &plaintext,
+                    aad: &header,
+                },
+            )
+            .unwrap();
+        let mut out = header;
+        out.extend_from_slice(&ciphertext);
+        out
+    }
+
+    #[test]
+    fn a_version_2_keystore_still_opens() {
+        // Version 2 files exist on real machines, one of them serving on a public
+        // address. Bumping the format must not lock anybody out of their identity,
+        // which cannot be recreated -- recovery is not built yet (D11, M8).
+        let ring = keyring();
+        let root = ring.root().public();
+        let sealed = seal_v2(&ring, b"correct horse");
+
+        assert_eq!(sealed[MAGIC.len()], VERSION_V2);
+        assert_eq!(sealed.len(), HEADER_LEN_V2 + (sealed.len() - HEADER_LEN_V2));
+        assert_eq!(Keyring::params_of(&sealed).unwrap(), KdfParams::PRODUCTION);
+
+        let opened = Keyring::open(&sealed, b"correct horse").unwrap();
+        assert_eq!(opened.root().public(), root);
+
+        // And a wrong passphrase is still a wrong passphrase, not a format error.
+        assert!(matches!(
+            Keyring::open(&sealed, b"wrong"),
+            Err(CryptoError::KeystoreUnreadable)
+        ));
+    }
+
+    #[test]
+    fn re_sealing_moves_a_version_2_keystore_forward() {
+        let ring = keyring();
+        let v2 = seal_v2(&ring, b"p");
+        let opened = Keyring::open(&v2, b"p").unwrap();
+        let v3 = opened.seal_with(b"p", KdfParams::PRODUCTION).unwrap();
+        assert_eq!(v3[MAGIC.len()], VERSION);
+        assert_eq!(
+            Keyring::open(&v3, b"p").unwrap().root().public(),
+            ring.root().public()
+        );
+    }
+
+    #[test]
+    fn the_default_cost_is_the_production_cost() {
+        // Asserted rather than derived: the point is that nothing in the test
+        // configuration can quietly lower what a real keystore is sealed with.
+        assert_eq!(KdfParams::PRODUCTION.memory_kib, 65_536);
+        assert_eq!(KdfParams::PRODUCTION.iterations, 3);
+        assert!(KdfParams::PRODUCTION.is_production());
+        assert!(!KdfParams::insecure_for_tests().is_production());
+    }
+
+    #[test]
+    fn the_cost_is_recorded_and_survives_a_round_trip() {
+        let cheap = KdfParams::insecure_for_tests();
+        let sealed = keyring().seal_with(b"p", cheap).unwrap();
+        assert_eq!(Keyring::params_of(&sealed).unwrap(), cheap);
+
+        // The whole point: a file sealed cheaply is still openable by a caller
+        // that knows nothing about the cost, because the file carries it. Without
+        // this, a test-built keystore would be unreadable by the real binary.
+        assert!(Keyring::open(&sealed, b"p").is_ok());
+        let (_, params) = Keyring::open_with_params(&sealed, b"p").unwrap();
+        assert_eq!(params, cheap);
+    }
+
+    #[test]
+    fn the_recorded_cost_cannot_be_edited() {
+        // Lowering the cost on a stolen file, to make guessing cheaper, must not
+        // yield a file that opens. The edited value is a *valid* Argon2 cost, so
+        // this exercises the authentication rather than a parameter range check:
+        // the header is associated data, and the key derives from it, so either
+        // way the tag fails.
+        let cheap = KdfParams::insecure_for_tests();
+        let mut sealed = keyring().seal_with(b"p", cheap).unwrap();
+        let at = MAGIC.len() + 1;
+        let raised = cheap.memory_kib * 2;
+        sealed[at..at + 4].copy_from_slice(&raised.to_le_bytes());
+        assert!(matches!(
+            Keyring::open(&sealed, b"p"),
+            Err(CryptoError::KeystoreUnreadable)
+        ));
+    }
+
+    #[test]
+    fn a_cost_argon2_will_not_accept_is_a_format_error() {
+        // Distinct from the case above: nonsense in the header is rejected before
+        // any derivation is attempted, rather than being reported as a bad
+        // passphrase.
+        let mut sealed = keyring()
+            .seal_with(b"p", KdfParams::insecure_for_tests())
+            .unwrap();
+        let at = MAGIC.len() + 1;
+        sealed[at..at + 4].copy_from_slice(&1u32.to_le_bytes());
+        assert!(matches!(
+            Keyring::open(&sealed, b"p"),
+            Err(CryptoError::KeystoreFormat)
+        ));
+    }
+
     #[test]
     fn seals_and_opens() {
         let original = keyring();
         let root = original.root().public();
-        let sealed = original.seal(b"correct horse").unwrap();
+        let sealed = original.seal_with_test(b"correct horse").unwrap();
         let opened = Keyring::open(&sealed, b"correct horse").unwrap();
         assert_eq!(opened.root().public(), root);
     }
@@ -261,7 +530,7 @@ mod tests {
     fn the_prekey_seed_survives_a_round_trip() {
         let original = keyring();
         let public = original.prekeys().public(105).unwrap();
-        let sealed = original.seal(b"p").unwrap();
+        let sealed = original.seal_with_test(b"p").unwrap();
         let opened = Keyring::open(&sealed, b"p").unwrap();
         assert_eq!(opened.prekeys().public(105).unwrap(), public);
         assert_eq!(opened.prekeys().epoch(), 100);
@@ -269,7 +538,7 @@ mod tests {
 
     #[test]
     fn wrong_passphrase_fails() {
-        let sealed = keyring().seal(b"correct horse").unwrap();
+        let sealed = keyring().seal_with_test(b"correct horse").unwrap();
         assert!(matches!(
             Keyring::open(&sealed, b"correct horst"),
             Err(CryptoError::KeystoreUnreadable)
@@ -280,7 +549,7 @@ mod tests {
     fn tampering_with_the_header_fails() {
         // The salt is authenticated, so editing it must not merely produce a
         // different key -- it must fail the tag.
-        let mut sealed = keyring().seal(b"passphrase").unwrap();
+        let mut sealed = keyring().seal_with_test(b"passphrase").unwrap();
         sealed[10] ^= 0x01;
         assert!(matches!(
             Keyring::open(&sealed, b"passphrase"),
@@ -290,7 +559,7 @@ mod tests {
 
     #[test]
     fn tampering_with_the_ciphertext_fails() {
-        let mut sealed = keyring().seal(b"passphrase").unwrap();
+        let mut sealed = keyring().seal_with_test(b"passphrase").unwrap();
         let last = sealed.len() - 1;
         sealed[last] ^= 0x01;
         assert!(matches!(
@@ -315,7 +584,7 @@ mod tests {
     fn sealed_bytes_do_not_contain_the_key() {
         let original = keyring();
         let seed = original.root().seed();
-        let sealed = original.seal(b"passphrase").unwrap();
+        let sealed = original.seal_with_test(b"passphrase").unwrap();
         assert!(
             !sealed.windows(32).any(|w| w == seed.as_slice()),
             "root seed appears in the sealed file"
@@ -327,7 +596,10 @@ mod tests {
         // Fresh salt and nonce each time, so identical input must not give
         // identical output.
         let ring = keyring();
-        assert_ne!(ring.seal(b"p").unwrap(), ring.seal(b"p").unwrap());
+        assert_ne!(
+            ring.seal_with_test(b"p").unwrap(),
+            ring.seal_with_test(b"p").unwrap()
+        );
     }
 
     #[test]
