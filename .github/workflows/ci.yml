@@ -17,6 +17,11 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # Compilation is most of this job; the tests themselves are dominated by
+      # Argon2, which no cache can help with (D9 -- it is meant to be expensive).
+      # Keyed on the toolchain and Cargo.lock, so a dependency change misses.
+      - uses: Swatinem/rust-cache@v2
+
       - name: format
         run: cargo fmt --all --check
 
@@ -37,6 +42,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.88.0
+
+      # Its own cache: a different rustc produces different artifacts, and the
+      # key includes the toolchain, so this never collides with `check`.
+      - uses: Swatinem/rust-cache@v2
+
       - run: cargo build --workspace
 
   # Architectural boundaries from architecture §34.1 are load-bearing, not
