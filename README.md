@@ -58,6 +58,46 @@ nodectl bundle import /media/usb/out.pack     # on the other
 A node serves public areas and identity snapshots to anyone who connects, and an
 inbox only to its owner. It is never obliged to answer: quotas are local policy.
 
+## Reading it like it is 1994
+
+`nodectl` is the whole system, but nobody reads a message board through a CLI.
+`pigeoned` is a full-screen reader in the shape of the FidoNet ones — GoldED,
+Blue Wave, Msged — because they were built for exactly this kind of network: you
+read and write against a local store, and a separate, deliberate step exchanges
+mail with a peer.
+
+```bash
+export PIGEONNET_PASSPHRASE=...   # without it, the reader opens read-only
+pigeoned
+```
+
+Areas, then messages, then the message. Replies are drawn as a tree, the way
+`tree(1)` draws a directory, so the shape of a discussion is visible without
+opening anything:
+
+```text
+7     2026-09-07 06:34 joshua            What is the actual threat model here?
+8     2026-09-08 06:34 jaytaph*          ├── The part I find hard to dismiss is…
+9     2026-09-08 06:41 joshua            │   └── Then the mitigation is not crypto…
+10    2026-09-09 06:35 joshua            └── Worth separating the two cases.
+```
+
+Thread roots carry no connector: they share an area, which is not a relationship
+the objects record, and a spine between them would claim one.
+
+`Enter` goes in, `Esc` comes back,
+`W` writes, `R` replies, `S` syncs, `T` changes the colour scheme and `?` lists
+the keys. Writing a message ends with `Esc`, which asks whether to send it —
+`Ctrl-S` would have been the obvious choice and is the wrong one, because it is
+XOFF and the terminal eats it.
+
+Four schemes: `Ice` (the blue-and-cyan default), `Ember`, `Phosphor` and `Amber`.
+`PIGEONNET_THEME` picks the one it starts on.
+
+A name shown with a trailing `*` is **self-asserted** — the author's own claim,
+authenticated but vouched for by nobody. A name without one is a label set on
+this machine (§5.2).
+
 ## Documents
 
 | | |
@@ -79,6 +119,7 @@ crates/
   pigeonnet-node     node core: store + proto + echoes + policy
   pigeonnet-net      transports; the only crate that knows tokio
   nodectl            command line interface
+  pigeonnet-tui      `pigeoned`, the full-screen reader
 ```
 
 `core`, `crypto`, `proto` and `bundle` take no I/O, no clock and no ambient

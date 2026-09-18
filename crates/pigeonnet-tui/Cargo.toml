@@ -1,0 +1,24 @@
+[package]
+name = "pigeonnet-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "pigeoned"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+pigeonnet-core.workspace = true
+pigeonnet-node.workspace = true
+pigeonnet-net.workspace = true
+pigeonnet-proto.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true

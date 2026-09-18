@@ -9,6 +9,7 @@ members = [
     "crates/pigeonnet-node",
     "crates/pigeonnet-net",
     "crates/nodectl",
+    "crates/pigeonnet-tui",
 ]
 
 [workspace.package]
@@ -54,6 +55,10 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 
 # transports (pigeonnet-net only)
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "io-util", "macros", "time"] }
+
+# terminal user interface (pigeonnet-tui only)
+ratatui = "0.30.2"
+crossterm = "0.29.0"
 
 # cli and diagnostics
 clap = { version = "4.6.7", features = ["derive"] }
