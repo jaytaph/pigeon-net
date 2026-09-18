@@ -10,9 +10,9 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -33,9 +33,9 @@ jobs:
 
   # The MSRV in Cargo.toml is a claim. This is what makes it true.
   msrv:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.88.0
       - run: cargo build --workspace
 
@@ -43,18 +43,18 @@ jobs:
   # stylistic: if tokio reaches the object model, validation stops being
   # reproducible and fuzzable. Nothing but this check enforces that.
   layering:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - run: ./scripts/check-layering.sh
 
   # Supply chain: known advisories, licence obligations, and where crates come
   # from. Policy lives in deny.toml; adding a licence there is a decision.
   supply-chain:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: EmbarkStudios/cargo-deny-action@v2
 
@@ -62,18 +62,24 @@ jobs:
   # push is a smoke test, not a campaign -- it catches the obvious regression,
   # and longer runs belong on a schedule.
   fuzz:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@nightly
       - run: cargo install cargo-fuzz --locked
-      - run: cargo fuzz run object_decode -- -max_total_time=60
+
+      # `+nightly` is not decoration. `rust-toolchain.toml` pins the whole tree
+      # to a stable release, and rustup honours that file over whatever the
+      # toolchain action installed -- so without the override rustc rejects
+      # `-Zsanitizer=address` and the job dies before trying a single input.
+      # It did exactly that on every push from M3 until this was fixed.
+      - run: cargo +nightly fuzz run object_decode -- -max_total_time=60
         working-directory: fuzz
-      - run: cargo fuzz run canonical_roundtrip -- -max_total_time=60
+      - run: cargo +nightly fuzz run canonical_roundtrip -- -max_total_time=60
         working-directory: fuzz
-      - run: cargo fuzz run frame_decode -- -max_total_time=60
+      - run: cargo +nightly fuzz run frame_decode -- -max_total_time=60
         working-directory: fuzz
-      - run: cargo fuzz run session_drive -- -max_total_time=60
+      - run: cargo +nightly fuzz run session_drive -- -max_total_time=60
         working-directory: fuzz
-      - run: cargo fuzz run bundle_decode -- -max_total_time=60
+      - run: cargo +nightly fuzz run bundle_decode -- -max_total_time=60
         working-directory: fuzz

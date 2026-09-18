@@ -119,3 +119,24 @@ it changes about how you work.
   unstaged together in two columns, and a file already committed earlier in the
   session simply does not appear, which reads as "nothing extra is staged".
 - **Status:** promoted to `AGENTS.md`.
+
+## `rust-toolchain.toml` overrides the toolchain a CI action installs
+- **Found:** 2026-09-18 — the `fuzz` job had failed on every push since M3, so the
+  fuzzers guarding untrusted input had never once run in CI. Nobody noticed,
+  because the job failed during setup rather than on a finding.
+- **Claim:** rustup resolves the toolchain by walking up from the working
+  directory, and `rust-toolchain.toml` wins over whatever `dtolnay/rust-toolchain@nightly`
+  made default. The fuzz crate is its own workspace, but it still sits under the
+  repo root, so `cargo fuzz` ran under pinned stable and rustc rejected
+  `-Zsanitizer=address` before trying a single input. The fix is an explicit
+  `cargo +nightly fuzz run ...`; the action is still needed, to install nightly.
+- **Check:** `cd fuzz && rustc --version` — prints the pinned stable, not nightly.
+  Then `cargo fuzz run object_decode -- -max_total_time=5` reproduces it exactly.
+- **So:** any step needing a different toolchain than the pinned one must say so
+  with `+toolchain`. Installing it is not selecting it.
+- **And:** a CI job that fails in setup looks the same as one that fails on a real
+  finding. When a job has never been green, confirm it can run at all before
+  trusting it as a guard. All five targets pass — 21 million runs across them with
+  no crash — so nothing was hiding behind the broken setup, but that was luck and
+  not something the red build could tell anyone.
+- **Status:** open.
