@@ -100,7 +100,9 @@ impl Node {
         passphrase: &[u8],
         now: i64,
     ) -> Result<ObjectId, NodeError> {
-        let parent = self.object(parent_id)?.ok_or(NodeError::NotInitialised)?;
+        let parent = self
+            .object(parent_id)?
+            .ok_or(NodeError::UnknownObject(parent_id))?;
         let parent_tbs = parent.tbs()?;
         if parent_tbs.object_type() != Ok(ObjectType::EchoPost) {
             return Err(NodeError::Object(pigeonnet_core::Error::BadThreading));

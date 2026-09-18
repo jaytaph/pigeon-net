@@ -63,6 +63,8 @@ pub enum NodeError {
     NotInitialised,
     /// Nothing is known about that identity — resolve or sync first (D12).
     UnknownIdentity(IdentityId),
+    /// This node does not hold that object.
+    UnknownObject(ObjectId),
     /// A local label was empty or too long.
     BadLabel,
     /// A snapshot did not verify.
@@ -106,6 +108,9 @@ impl core::fmt::Display for NodeError {
             ),
             Self::UnknownIdentity(id) => {
                 write!(f, "nothing known about {id} -- resolve or sync first")
+            }
+            Self::UnknownObject(id) => {
+                write!(f, "this node does not hold {id} -- sync first")
             }
             Self::Snapshot(e) => write!(f, "{e}"),
         }
@@ -431,7 +436,7 @@ impl Node {
         let genesis = self
             .store
             .get(identity.genesis_object())?
-            .ok_or(NodeError::NotInitialised)?;
+            .ok_or(NodeError::UnknownIdentity(identity))?;
         let mut state = IdentityState::from_genesis(&genesis)?;
         // Key management only, in causal order. Replaying every object the
         // identity authored would mean replaying them in lexicographic key

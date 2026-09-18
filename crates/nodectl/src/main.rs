@@ -2,6 +2,25 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+/// Write a line to stdout, exiting quietly if the reader has gone away.
+///
+/// `println!` panics on a closed pipe, so `nodectl echo read AREA | head` would
+/// end in a backtrace. A command-line tool piped into `head` or `less` must stop,
+/// not complain. We cannot restore the default `SIGPIPE` handler because that
+/// needs `unsafe`, and the workspace forbids it -- so the write is checked
+/// instead.
+macro_rules! out {
+    () => { out!("") };
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        if let Err(error) = writeln!(std::io::stdout(), $($arg)*)
+            && error.kind() == std::io::ErrorKind::BrokenPipe
+        {
+            std::process::exit(0);
+        }
+    }};
+}
+
 mod render;
 
 use std::{
@@ -267,17 +286,17 @@ fn main() -> Result<()> {
         Command::Bundle(BundleCommand::Import { path }) => import_bundle(&node, &path),
         Command::Echo(EchoCommand::Subscribe { area }) => {
             node.subscribe(&parse_area(&area)?)?;
-            println!("subscribed to echo://{area}");
+            out!("subscribed to echo://{area}");
             Ok(())
         }
         Command::Echo(EchoCommand::Unsubscribe { area }) => {
             node.unsubscribe(&parse_area(&area)?)?;
-            println!("unsubscribed from echo://{area}");
+            out!("unsubscribed from echo://{area}");
             Ok(())
         }
         Command::Echo(EchoCommand::List) => {
             for area in node.subscriptions()? {
-                println!("echo://{area}");
+                out!("echo://{area}");
             }
             Ok(())
         }
@@ -295,17 +314,17 @@ fn main() -> Result<()> {
                 .transpose()?;
             node.store().peer_add(&address, expect, now_millis()?)?;
             match expect {
-                Some(id) => println!("added {address}, requiring {id}"),
-                None => println!("added {address}; its identity pins on first sync"),
+                Some(id) => out!("added {address}, requiring {id}"),
+                None => out!("added {address}; its identity pins on first sync"),
             }
             Ok(())
         }
         Command::Peer(PeerCommand::Remove { address }) => {
             let address = with_default_port(&address);
             if node.store().peer_remove(&address)? {
-                println!("removed {address}");
+                out!("removed {address}");
             } else {
-                println!("no such peer: {address}");
+                out!("no such peer: {address}");
             }
             Ok(())
         }
@@ -316,54 +335,54 @@ fn main() -> Result<()> {
             let identity =
                 pigeonnet_core::IdentityId::parse(&identity).map_err(|e| anyhow::anyhow!("{e}"))?;
             let id = node.send_message(identity, &content, &passphrase()?, now_millis()?)?;
-            println!("created  {id}");
-            println!("queued   for the next sync");
+            out!("created  {id}");
+            out!("queued   for the next sync");
             Ok(())
         }
         Command::Inbox => show_inbox(&node),
         Command::Profile(ProfileCommand::SetName { name }) => {
             let id = node.publish_profile(Some(name.clone()), &passphrase()?, now_millis()?)?;
-            println!("published {id}");
-            println!("others will see  {name}  (self-asserted)");
+            out!("published {id}");
+            out!("others will see  {name}  (self-asserted)");
             Ok(())
         }
         Command::Profile(ProfileCommand::ClearName) => {
             let id = node.publish_profile(None, &passphrase()?, now_millis()?)?;
-            println!("published {id}");
-            println!("display name cleared");
+            out!("published {id}");
+            out!("display name cleared");
             Ok(())
         }
         Command::Name(NameCommand::Set { identity, label }) => {
             let identity = parse_identity(&identity)?;
             node.set_local_name(identity, &label, now_millis()?)?;
-            println!("{identity}");
-            println!("  is now, to this node only: {label}");
+            out!("{identity}");
+            out!("  is now, to this node only: {label}");
             Ok(())
         }
         Command::Name(NameCommand::Remove { identity }) => {
             let identity = parse_identity(&identity)?;
             if node.remove_local_name(identity)? {
-                println!("label removed");
+                out!("label removed");
             } else {
-                println!("no label for that identity");
+                out!("no label for that identity");
             }
             Ok(())
         }
         Command::Name(NameCommand::List) => {
             let names = node.local_names()?;
             if names.is_empty() {
-                println!("no local labels -- try: nodectl name set <identity> <label>");
+                out!("no local labels -- try: nodectl name set <identity> <label>");
             }
             for (identity, label) in names {
-                println!("{label:<20} {identity}");
+                out!("{label:<20} {identity}");
             }
             Ok(())
         }
         Command::Expire => {
             let destroyed = node.destroy_expired_prekeys(&passphrase()?, now_millis()?)?;
             match destroyed {
-                0 => println!("nothing has expired yet"),
-                n => println!("destroyed {n} epoch secrets; messages sealed to them are gone"),
+                0 => out!("nothing has expired yet"),
+                n => out!("destroyed {n} epoch secrets; messages sealed to them are gone"),
             }
             Ok(())
         }
@@ -371,8 +390,8 @@ fn main() -> Result<()> {
         Command::Prekeys { lookahead } => {
             let published = node.publish_prekeys(&passphrase()?, now_millis()?, lookahead)?;
             match published.len() {
-                0 => println!("already covered; nothing to publish"),
-                n => println!(
+                0 => out!("already covered; nothing to publish"),
+                n => out!(
                     "published {n} epoch prekeys, epochs {}..={}",
                     published.first().copied().unwrap_or(0),
                     published.last().copied().unwrap_or(0)
@@ -430,43 +449,43 @@ fn create_identity(node: &Node, name: Option<&str>, when: i64) -> Result<()> {
     let passphrase = passphrase()?;
     let created = node.create_identity(&passphrase, when)?;
 
-    println!("Generating root key      ed25519 ........ ok");
-    println!("Generating recovery key  ed25519 ........ ok");
-    println!("Generating identity key  x25519  ........ ok");
-    println!("Writing genesis object   IdentityCreated  ok");
-    println!();
-    println!("  Your identity is");
-    println!("      {}", created.identity);
-    println!();
-    println!("  Fingerprint (read this aloud to verify in person)");
+    out!("Generating root key      ed25519 ........ ok");
+    out!("Generating recovery key  ed25519 ........ ok");
+    out!("Generating identity key  x25519  ........ ok");
+    out!("Writing genesis object   IdentityCreated  ok");
+    out!();
+    out!("  Your identity is");
+    out!("      {}", created.identity);
+    out!();
+    out!("  Fingerprint (read this aloud to verify in person)");
     for line in render::fingerprint(created.identity.as_bytes()) {
-        println!("      {line}");
+        out!("      {line}");
     }
-    println!();
-    println!(
+    out!();
+    out!(
         "Granting device key      {:<16} ok",
         name.unwrap_or("this-device")
     );
-    println!("Locking keystore         argon2id         ok");
-    println!();
-    println!("  \u{26a0}  RECOVERY KEY — write this down, on paper, now.");
-    println!();
-    println!(
+    out!("Locking keystore         argon2id         ok");
+    out!();
+    out!("  \u{26a0}  RECOVERY KEY — write this down, on paper, now.");
+    out!();
+    out!(
         "      {}",
         render::recovery_phrase(&created.recovery_secret)
     );
-    println!();
-    println!("     Not stored on this machine. Will not be shown again.");
-    println!("     Without it, a lost or stolen root key ends this identity.");
-    println!();
+    out!();
+    out!("     Not stored on this machine. Will not be shown again.");
+    out!("     Without it, a lost or stolen root key ends this identity.");
+    out!();
     if when < now_millis()? - 60_000 {
-        println!(
+        out!(
             "  dated        {}  (claimed, not proven)",
             render::iso8601(when)
         );
     }
-    println!("  genesis      {}", created.genesis);
-    println!("  device grant {}", created.device_grant);
+    out!("  genesis      {}", created.genesis);
+    out!("  device grant {}", created.device_grant);
     Ok(())
 }
 
@@ -485,22 +504,22 @@ fn show_identity(node: &Node) -> Result<()> {
     let identity = pigeonnet_core::IdentityId::from_genesis(genesis_author.id());
     let state = node.identity_state(identity)?;
 
-    println!("identity      {}", state.id());
-    println!("genesis       {}", state.id().genesis_object());
-    println!("root key      {}", state.root_key());
-    println!(
+    out!("identity      {}", state.id());
+    out!("genesis       {}", state.id().genesis_object());
+    out!("root key      {}", state.root_key());
+    out!(
         "recovery key  {}   (private half is on paper only)",
         state.recovery_key()
     );
-    println!("agreement key {}", state.agreement_key());
-    println!();
+    out!("agreement key {}", state.agreement_key());
+    out!();
     let device = keyring.device().public();
     match state.capabilities_of(device) {
-        Some(capabilities) => println!("this device   {device}\n              {capabilities:?}"),
-        None => println!("this device   {device}\n              not delegated"),
+        Some(capabilities) => out!("this device   {device}\n              {capabilities:?}"),
+        None => out!("this device   {device}\n              not delegated"),
     }
-    println!();
-    println!("objects held  {}", node.store().len()?);
+    out!();
+    out!("objects held  {}", node.store().len()?);
     Ok(())
 }
 
@@ -511,16 +530,16 @@ fn show_object(node: &Node, id: &str) -> Result<()> {
         .context("object not found in this node's store")?;
     let tbs = object.tbs()?;
 
-    println!("id            {}", object.id());
-    println!("version       {}", tbs.version);
+    out!("id            {}", object.id());
+    out!("version       {}", tbs.version);
     match tbs.object_type() {
-        Ok(t) => println!("type          {t:?} ({})", tbs.type_code),
-        Err(_) => println!(
+        Ok(t) => out!("type          {t:?} ({})", tbs.type_code),
+        Err(_) => out!(
             "type          unknown ({}) — storable and relayable",
             tbs.type_code
         ),
     }
-    println!(
+    out!(
         "author        {}",
         if tbs.is_genesis() {
             "(genesis — this object creates the identity)".to_string()
@@ -528,23 +547,23 @@ fn show_object(node: &Node, id: &str) -> Result<()> {
             tbs.author.to_string()
         }
     );
-    println!("signing key   {}", tbs.signing_key);
-    println!(
+    out!("signing key   {}", tbs.signing_key);
+    out!(
         "timestamp     {} ({})",
         render::iso8601(tbs.timestamp.as_millis()),
         tbs.timestamp.as_millis()
     );
-    println!("sequence      {}", tbs.sequence);
-    println!("payload       {} bytes", tbs.payload.len());
-    println!("signature     {}", object.signature());
+    out!("sequence      {}", tbs.sequence);
+    out!("payload       {} bytes", tbs.payload.len());
+    out!("signature     {}", object.signature());
 
     if tbs.object_type() == Ok(pigeonnet_core::ObjectType::IdentityCreated)
         && let Ok(payload) = IdentityCreated::decode_payload(&tbs.payload)
     {
-        println!();
-        println!("  root key      {}", payload.root_key);
-        println!("  recovery key  {}", payload.recovery_key);
-        println!("  agreement key {}", payload.agreement_key);
+        out!();
+        out!("  root key      {}", payload.root_key);
+        out!("  recovery key  {}", payload.recovery_key);
+        out!("  agreement key {}", payload.agreement_key);
     }
     Ok(())
 }
@@ -559,10 +578,10 @@ fn export_bundle(node: &Node, path: &std::path::Path, peer: Option<&str>) -> Res
     let bytes = node.export_bundle(origin, now_millis()?, &[], peer)?;
     std::fs::write(path, &bytes).with_context(|| format!("writing {}", path.display()))?;
 
-    println!("  objects   {}", node.store().len()?);
-    println!("  origin    {origin}");
-    println!("  size      {} bytes", bytes.len());
-    println!("  written to {}", path.display());
+    out!("  objects   {}", node.store().len()?);
+    out!("  origin    {origin}");
+    out!("  size      {} bytes", bytes.len());
+    out!("  written to {}", path.display());
     Ok(())
 }
 
@@ -570,14 +589,14 @@ fn import_bundle(node: &Node, path: &std::path::Path) -> Result<()> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let (report, requests) = node.import_bundle(&bytes, now_millis()?)?;
 
-    println!("  {} objects accepted", report.accepted);
-    println!("  {} already held", report.already_held);
-    println!("  {} cursors advanced", report.cursors_advanced);
+    out!("  {} objects accepted", report.accepted);
+    out!("  {} already held", report.already_held);
+    out!("  {} cursors advanced", report.cursors_advanced);
     if !requests.is_empty() {
-        println!();
-        println!("  the sender is missing everything after:");
+        out!();
+        out!("  the sender is missing everything after:");
         for request in requests {
-            println!("    {:?} after {}", request.stream, request.after);
+            out!("    {:?} after {}", request.stream, request.after);
         }
     }
     Ok(())
@@ -591,21 +610,21 @@ fn read_area(node: &Node, area: &pigeonnet_core::AreaName) -> Result<()> {
     let now = now_millis()?;
     let posts = node.read_area(area)?;
     if posts.is_empty() {
-        println!("echo://{area} is empty");
+        out!("echo://{area} is empty");
         return Ok(());
     }
     for post in posts {
         let indent = "  ".repeat(post.depth);
-        println!(
+        out!(
             "{indent}{}  {}",
             render::iso8601(post.timestamp.as_millis()),
             post.id
         );
-        println!("{indent}  from {}", who(node, post.author, now));
+        out!("{indent}  from {}", who(node, post.author, now));
         for line in post.post.content.lines() {
-            println!("{indent}  {line}");
+            out!("{indent}  {line}");
         }
-        println!();
+        out!();
     }
     Ok(())
 }
@@ -621,42 +640,42 @@ fn show_resolved(node: &Node, identity: &str) -> Result<()> {
         .verify(pigeonnet_core::Timestamp::from_millis(now))
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    println!("identity      {}", resolved.state.id());
+    out!("identity      {}", resolved.state.id());
     if let Some(profile) = &resolved.profile
         && let Some(name) = &profile.display_name
     {
-        println!("calls itself  {name}   (self-asserted; not a bound name)");
+        out!("calls itself  {name}   (self-asserted; not a bound name)");
     }
-    println!("root key      {}", resolved.state.root_key());
-    println!(
+    out!("root key      {}", resolved.state.root_key());
+    out!(
         "usable until  {}   (clamped to its contents, not the server's claim)",
         render::iso8601(resolved.valid_until.as_millis())
     );
-    println!();
+    out!();
 
-    println!("prekeys       {}", resolved.prekeys.len());
+    out!("prekeys       {}", resolved.prekeys.len());
     let mut prekeys = resolved.prekeys.clone();
     prekeys.sort_by_key(|(_, prekey)| prekey.epoch);
     for (device, prekey) in &prekeys {
-        println!(
+        out!(
             "  epoch {:<6} until {}  device {}",
             prekey.epoch,
             render::iso8601(prekey.valid_until.as_millis()),
             &device.to_string()[..24]
         );
     }
-    println!();
+    out!();
 
     if resolved.carriers.is_empty() {
-        println!("carriers      none confirmed");
+        out!("carriers      none confirmed");
     } else {
-        println!("carriers      {} confirmed", resolved.carriers.len());
+        out!("carriers      {} confirmed", resolved.carriers.len());
         for carrier in &resolved.carriers {
-            println!("  cost {:<4} {}", carrier.cost, carrier.node);
+            out!("  cost {:<4} {}", carrier.cost, carrier.node);
         }
     }
     for carrier in &resolved.unconfirmed {
-        println!(
+        out!(
             "  UNCONFIRMED  {}  (claimed, but it has not consented)",
             carrier.node
         );
@@ -680,21 +699,21 @@ fn with_default_port(address: &str) -> String {
 fn list_peers(node: &Node) -> Result<()> {
     let peers = node.store().peers()?;
     if peers.is_empty() {
-        println!("no peers configured — try: nodectl peer add hub.example.net");
+        out!("no peers configured — try: nodectl peer add hub.example.net");
         return Ok(());
     }
     for peer in peers {
-        println!("{}", peer.address);
+        out!("{}", peer.address);
         match peer.node_id {
-            Some(id) => println!("  identity   {id}"),
-            None => println!("  identity   not yet pinned"),
+            Some(id) => out!("  identity   {id}"),
+            None => out!("  identity   not yet pinned"),
         }
         match peer.last_sync_at {
-            Some(at) => println!("  last sync  {}", render::iso8601(at)),
-            None => println!("  last sync  never"),
+            Some(at) => out!("  last sync  {}", render::iso8601(at)),
+            None => out!("  last sync  never"),
         }
         if let Some(error) = peer.last_error {
-            println!("  last error {error}");
+            out!("  last error {error}");
         }
     }
     Ok(())
@@ -725,7 +744,7 @@ fn run_sync(node: &Node, only: Option<&str>) -> Result<()> {
         None => node.store().peers()?,
     };
     if peers.is_empty() {
-        println!("no peers to sync with");
+        out!("no peers to sync with");
         return Ok(());
     }
 
@@ -756,14 +775,14 @@ fn run_sync(node: &Node, only: Option<&str>) -> Result<()> {
                 } else {
                     "pull only"
                 };
-                println!("{} objects, {direction}", report.accepted);
+                out!("{} objects, {direction}", report.accepted);
             }
             Err(error) => {
                 // Recorded rather than only printed: a peer that has been
                 // failing for a week is worth seeing in `peer list`.
                 node.store()
                     .peer_record_sync(&peer.address, now, Some(&error.to_string()))?;
-                println!("failed: {error}");
+                out!("failed: {error}");
             }
         }
     }
@@ -780,13 +799,13 @@ fn run_serve(node: &Node, listen: &str, reciprocate: bool) -> Result<()> {
         let listener = tokio::net::TcpListener::bind(listen)
             .await
             .with_context(|| format!("binding {listen}"))?;
-        println!("listening on {listen}");
-        println!("identity   {local}");
-        println!("serving    public areas and identity snapshots to anyone;");
-        println!("           inboxes only to their owner (\u{a7}15.4)");
+        out!("listening on {listen}");
+        out!("identity   {local}");
+        out!("serving    public areas and identity snapshots to anyone;");
+        out!("           inboxes only to their owner (\u{a7}15.4)");
         if reciprocate {
-            println!("           and pulling from whoever connects, so peers behind");
-            println!("           a firewall can publish (--serve-only to stop)");
+            out!("           and pulling from whoever connects, so peers behind");
+            out!("           a firewall can publish (--serve-only to stop)");
         }
         pigeonnet_net::serve(node, local, &listener, limits, reciprocate, || {
             now_millis().unwrap_or(0)
@@ -800,7 +819,7 @@ fn show_inbox(node: &Node) -> Result<()> {
     let now = now_millis()?;
     let messages = node.inbox(&passphrase()?, now)?;
     if messages.is_empty() {
-        println!("inbox is empty");
+        out!("inbox is empty");
         return Ok(());
     }
     for message in messages {
@@ -808,33 +827,31 @@ fn show_inbox(node: &Node) -> Result<()> {
             pigeonnet_core::ForwardSecrecy::Epoch => "forward-secret",
             pigeonnet_core::ForwardSecrecy::None => "NOT forward-secret",
         };
-        println!(
+        out!(
             "{}  {}",
             render::iso8601(message.timestamp.as_millis()),
             message.id
         );
-        println!("  from     {}", who(node, message.sender, now));
-        println!("  secrecy  {secrecy}");
+        out!("  from     {}", who(node, message.sender, now));
+        out!("  secrecy  {secrecy}");
         match message.body {
             pigeonnet_node::MessageBody::Opened(text) => {
-                println!();
+                out!();
                 for line in text.lines() {
-                    println!("  {line}");
+                    out!("  {line}");
                 }
             }
             pigeonnet_node::MessageBody::Expired => {
-                println!(
-                    "  (the epoch this was sealed to has been destroyed \u{2014} gone for good)"
-                );
+                out!("  (the epoch this was sealed to has been destroyed \u{2014} gone for good)");
             }
             pigeonnet_node::MessageBody::NotForThisDevice => {
-                println!("  (sealed to another of your devices)");
+                out!("  (sealed to another of your devices)");
             }
             pigeonnet_node::MessageBody::Unreadable => {
-                println!("  (could not be opened)");
+                out!("  (could not be opened)");
             }
         }
-        println!();
+        out!();
     }
     Ok(())
 }
@@ -871,11 +888,11 @@ fn resolve_when(at: Option<&str>) -> Result<i64> {
 }
 
 fn report_created(id: pigeonnet_core::ObjectId, backdated: bool, when: i64) {
-    println!("created  {id}");
+    out!("created  {id}");
     if backdated {
         // Stated, not buried. The timestamp is what the author claims, and a
         // reader has no way to check it.
-        println!("dated    {}  (claimed, not proven)", render::iso8601(when));
+        out!("dated    {}  (claimed, not proven)", render::iso8601(when));
     }
-    println!("queued   for subscribed peers");
+    out!("queued   for subscribed peers");
 }
