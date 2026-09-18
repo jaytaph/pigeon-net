@@ -18,7 +18,7 @@ pub mod naming;
 pub mod replication;
 pub mod snapshot;
 
-pub use echo::ThreadedPost;
+pub use echo::{AreaStats, ThreadedPost};
 pub use inbox::DeviceCredential;
 pub use message::{MessageBody, ReceivedMessage};
 pub use naming::Naming;

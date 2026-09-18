@@ -23,7 +23,100 @@ pub struct ThreadedPost {
     pub post: EchoPost,
 }
 
+/// What this node can say about an area, from what it holds.
+///
+/// Every figure here is a fact about *this node's store*, not about the area.
+/// Another node carrying the same area will report different numbers, and
+/// neither is wrong — there is no authoritative view of an echo, by design.
+#[derive(Clone, Debug)]
+pub struct AreaStats {
+    /// The area.
+    pub area: AreaName,
+    /// Whether this node carries it deliberately, or merely happens to hold it.
+    pub subscribed: bool,
+    /// Posts held.
+    pub posts: usize,
+    /// Distinct threads among them.
+    pub threads: usize,
+    /// The earliest post held.
+    ///
+    /// **Not the area's creation date.** No object creates an area; one exists
+    /// because somebody posted to it. The earliest post this node happens to
+    /// hold says nothing about when the area began, and calling it a creation
+    /// date would be a small lie that gets repeated.
+    pub first_held: Timestamp,
+    /// The most recent post held.
+    pub latest: Timestamp,
+    /// Distinct authors.
+    pub voices: usize,
+}
+
 impl Node {
+    /// Statistics for every area this node holds posts in.
+    ///
+    /// Scans stored posts rather than consulting an index. Fine for the volumes
+    /// a personal node sees; an area with a decade of traffic would want the
+    /// counts maintained on write instead.
+    pub fn area_stats(&self) -> Result<Vec<AreaStats>, NodeError> {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let subscribed: BTreeSet<AreaName> = self.subscriptions()?.into_iter().collect();
+
+        struct Acc {
+            posts: usize,
+            threads: BTreeSet<ObjectId>,
+            voices: BTreeSet<IdentityId>,
+            first: i64,
+            latest: i64,
+        }
+        let mut areas: BTreeMap<AreaName, Acc> = BTreeMap::new();
+
+        for object in self.store().objects_of_type(ObjectType::EchoPost.code())? {
+            let id = object.id();
+            let tbs = object.tbs()?;
+            let post = EchoPost::decode_payload(&tbs.payload)?;
+            let at = tbs.timestamp.as_millis();
+
+            let acc = areas.entry(post.area.clone()).or_insert_with(|| Acc {
+                posts: 0,
+                threads: BTreeSet::new(),
+                voices: BTreeSet::new(),
+                first: at,
+                latest: at,
+            });
+            acc.posts += 1;
+            acc.threads.insert(post.thread_root(id));
+            acc.voices.insert(tbs.author);
+            acc.first = acc.first.min(at);
+            acc.latest = acc.latest.max(at);
+        }
+
+        // An area subscribed to but silent still deserves a row: "nothing here
+        // yet" and "you are not carrying this" are different answers.
+        for area in &subscribed {
+            areas.entry(area.clone()).or_insert_with(|| Acc {
+                posts: 0,
+                threads: BTreeSet::new(),
+                voices: BTreeSet::new(),
+                first: 0,
+                latest: 0,
+            });
+        }
+
+        Ok(areas
+            .into_iter()
+            .map(|(area, acc)| AreaStats {
+                subscribed: subscribed.contains(&area),
+                area,
+                posts: acc.posts,
+                threads: acc.threads.len(),
+                voices: acc.voices.len(),
+                first_held: Timestamp::from_millis(acc.first),
+                latest: Timestamp::from_millis(acc.latest),
+            })
+            .collect())
+    }
+
     /// Subscribe to an echo area.
     pub fn subscribe(&self, area: &AreaName) -> Result<(), NodeError> {
         Ok(self.store().subscribe(area.as_str())?)

@@ -296,3 +296,71 @@ fn a_reply_whose_parent_is_missing_still_appears() {
     );
     assert!(!contents.contains(&"middle".to_owned()));
 }
+
+#[test]
+fn area_stats_count_what_this_node_holds() {
+    let (_a_dir, a, _) = node("stats-a");
+    let one = AreaName::parse("TECH.RUST").unwrap();
+    let two = AreaName::parse("RETRO.C64").unwrap();
+    a.subscribe(&one).unwrap();
+    a.subscribe(&two).unwrap();
+
+    let root = a.post(&one, "first", PASS, NOW).unwrap();
+    a.reply(root, "second", PASS, NOW + 1000).unwrap();
+    a.post(&one, "another thread", PASS, NOW + 2000).unwrap();
+
+    let stats = a.area_stats().unwrap();
+    let rust = stats.iter().find(|s| s.area == one).unwrap();
+    assert_eq!(rust.posts, 3);
+    assert_eq!(
+        rust.threads, 2,
+        "a reply belongs to its root, not its own thread"
+    );
+    assert_eq!(rust.voices, 1);
+    assert_eq!(rust.first_held.as_millis(), NOW);
+    assert_eq!(rust.latest.as_millis(), NOW + 2000);
+    assert!(rust.subscribed);
+
+    // A subscribed but silent area still gets a row: "nothing yet" and "not
+    // carrying this" are different answers.
+    let c64 = stats.iter().find(|s| s.area == two).unwrap();
+    assert_eq!(c64.posts, 0);
+    assert!(c64.subscribed);
+}
+
+#[test]
+fn an_area_held_without_subscribing_is_still_counted() {
+    // After syncing, a node may hold posts in areas it never asked for.
+    let (_a_dir, a, a_id) = node("stats-b");
+    let (_b_dir, b, b_id) = node("stats-c");
+    let area = AreaName::parse("GOSUB.DEV").unwrap();
+    a.subscribe(&area).unwrap();
+    a.post(&area, "over here", PASS, NOW).unwrap();
+
+    // B never subscribes, but syncs everything.
+    pull(&b, b_id, &a, a_id);
+
+    let stats = b.area_stats().unwrap();
+    let held = stats.iter().find(|s| s.area == area).unwrap();
+    assert_eq!(held.posts, 1);
+    assert!(!held.subscribed, "held, but not carried deliberately");
+}
+
+#[test]
+fn two_voices_are_counted_separately() {
+    let (_a_dir, a, a_id) = node("stats-d");
+    let (_b_dir, b, b_id) = node("stats-e");
+    let area = AreaName::parse("GOSUB.DEV").unwrap();
+    a.subscribe(&area).unwrap();
+    b.subscribe(&area).unwrap();
+
+    let root = a.post(&area, "mine", PASS, NOW).unwrap();
+    pull(&b, b_id, &a, a_id);
+    b.reply(root, "yours", PASS, NOW + 1000).unwrap();
+    pull(&a, a_id, &b, b_id);
+
+    let stats = a.area_stats().unwrap();
+    let s = stats.iter().find(|s| s.area == area).unwrap();
+    assert_eq!(s.voices, 2);
+    assert_eq!(s.threads, 1, "a reply does not start a thread");
+}

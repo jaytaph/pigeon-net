@@ -214,8 +214,12 @@ enum EchoCommand {
         /// The area.
         area: String,
     },
-    /// Show subscribed areas.
-    List,
+    /// Show areas, with what this node holds in each.
+    List {
+        /// Include areas held but not subscribed to.
+        #[arg(long)]
+        all: bool,
+    },
     /// Read an area's threads.
     Read {
         /// The area.
@@ -294,12 +298,7 @@ fn main() -> Result<()> {
             out!("unsubscribed from echo://{area}");
             Ok(())
         }
-        Command::Echo(EchoCommand::List) => {
-            for area in node.subscriptions()? {
-                out!("echo://{area}");
-            }
-            Ok(())
-        }
+        Command::Echo(EchoCommand::List { all }) => list_areas(&node, all),
         Command::Echo(EchoCommand::Read { area }) => read_area(&node, &parse_area(&area)?),
         Command::Post { area, content, at } => {
             let when = resolve_when(at.as_deref())?;
@@ -493,16 +492,12 @@ fn show_identity(node: &Node) -> Result<()> {
     let passphrase = passphrase()?;
     let keyring = node.keyring(&passphrase)?;
 
-    // The identity is derived from stored objects, not from the keystore: the
-    // keystore holds secrets, the chain holds the truth.
-    let genesis_author = node
-        .store()
-        .objects_by_author(pigeonnet_core::IdentityId::ZERO)?
-        .into_iter()
-        .next()
-        .context("no genesis object in the store")?;
-    let identity = pigeonnet_core::IdentityId::from_genesis(genesis_author.id());
-    let state = node.identity_state(identity)?;
+    // Which identity is *ours* is recorded when it is created, not inferred from
+    // the store. A node that has synced holds other people's genesis objects
+    // too, and they are indistinguishable from its own -- scanning for one
+    // returns whichever happens to sort first, which is wrong the moment the
+    // node talks to anybody.
+    let state = node.identity_state(node.local_identity()?)?;
 
     out!("identity      {}", state.id());
     out!("genesis       {}", state.id().genesis_object());
@@ -895,4 +890,63 @@ fn report_created(id: pigeonnet_core::ObjectId, backdated: bool, when: i64) {
         out!("dated    {}  (claimed, not proven)", render::iso8601(when));
     }
     out!("queued   for subscribed peers");
+}
+
+fn list_areas(node: &Node, all: bool) -> Result<()> {
+    let mut stats = node.area_stats()?;
+    if !all {
+        stats.retain(|s| s.subscribed);
+    }
+    if stats.is_empty() {
+        out!("no areas -- try: nodectl echo subscribe GOSUB.DEV");
+        return Ok(());
+    }
+
+    // Newest activity first: what changed recently is what you want to read.
+    stats.sort_by(|a, b| b.latest.cmp(&a.latest).then_with(|| a.area.cmp(&b.area)));
+
+    out!(
+        "{:<22} {:>6} {:>8} {:>7} {:>12} {:>12}",
+        "AREA",
+        "POSTS",
+        "THREADS",
+        "VOICES",
+        "EARLIEST",
+        "LATEST"
+    );
+    let mut unsubscribed = false;
+    for s in &stats {
+        let mark = if s.subscribed { ' ' } else { '-' };
+        unsubscribed |= !s.subscribed;
+        let (earliest, latest) = if s.posts == 0 {
+            ("-".to_owned(), "-".to_owned())
+        } else {
+            (day(s.first_held), day(s.latest))
+        };
+        out!(
+            "{mark}{:<21} {:>6} {:>8} {:>7} {:>12} {:>12}",
+            s.area.as_str(),
+            s.posts,
+            s.threads,
+            s.voices,
+            earliest,
+            latest
+        );
+    }
+    if unsubscribed {
+        out!();
+        out!("- held, but not subscribed. `echo subscribe` to carry it deliberately.");
+    }
+    out!();
+    // Said once rather than in a column heading nobody would read twice.
+    out!("Counts are what this node holds, not what the area contains: another");
+    out!("node carrying the same area will report different numbers, and neither");
+    out!("is wrong. EARLIEST is the oldest post held, not when the area began --");
+    out!("nothing creates an area except somebody posting to it.");
+    Ok(())
+}
+
+/// Just the date part, which is all a listing needs.
+fn day(at: pigeonnet_core::Timestamp) -> String {
+    render::iso8601(at.as_millis()).chars().take(10).collect()
 }
