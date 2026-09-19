@@ -145,6 +145,32 @@ pub struct Keyring {
     /// has been ratcheted away.
     #[n(4)]
     prekey_epoch: u64,
+
+    /// The first epoch `prekey_seed` cannot reach (D16).
+    ///
+    /// Optional because keyrings written before D16 do not have it. Absent means
+    /// "bound this seed to the window its epoch falls in" — which gives a legacy
+    /// identity the bound immediately, at the cost that it has no cold half and so
+    /// cannot open the next window.
+    #[n(5)]
+    prekey_window_end: Option<u64>,
+
+    /// The outgoing window, kept only for retention (D16).
+    ///
+    /// Fields 3–5 are the *current* window; these three are the one before it.
+    /// Two is provably enough — see [`PrekeyWindows`](crate::PrekeyWindows) — and
+    /// absent simply means there is no outgoing window, which is the case for a
+    /// new identity and after the old one has been fully ratcheted away.
+    #[cbor(n(6), with = "minicbor::bytes")]
+    previous_prekey_seed: Option<[u8; 32]>,
+
+    /// The earliest epoch `previous_prekey_seed` can still produce.
+    #[n(7)]
+    previous_prekey_epoch: Option<u64>,
+
+    /// The first epoch `previous_prekey_seed` cannot reach.
+    #[n(8)]
+    previous_prekey_window_end: Option<u64>,
 }
 
 impl Keyring {
@@ -154,14 +180,18 @@ impl Keyring {
         root: &SigningKeypair,
         device: &SigningKeypair,
         agreement: &AgreementKeypair,
-        prekeys: &crate::PrekeySeed,
+        prekeys: &crate::PrekeyWindows,
     ) -> Self {
         Self {
             root_seed: *root.seed(),
             device_seed: *device.seed(),
             agreement_secret: *agreement.secret(),
-            prekey_seed: *prekeys.seed(),
-            prekey_epoch: prekeys.epoch(),
+            prekey_seed: *prekeys.current().seed(),
+            prekey_epoch: prekeys.current().epoch(),
+            prekey_window_end: Some(prekeys.current().window_end()),
+            previous_prekey_seed: prekeys.previous().map(|p| *p.seed()),
+            previous_prekey_epoch: prekeys.previous().map(crate::PrekeySeed::epoch),
+            previous_prekey_window_end: prekeys.previous().map(crate::PrekeySeed::window_end),
         }
     }
 
@@ -183,19 +213,44 @@ impl Keyring {
         AgreementKeypair::from_secret(&self.agreement_secret)
     }
 
-    /// The epoch prekey seed.
+    /// The epoch prekey windows this node holds.
     #[must_use]
-    pub fn prekeys(&self) -> crate::PrekeySeed {
-        crate::PrekeySeed::from_parts(self.prekey_seed, self.prekey_epoch)
+    pub fn prekeys(&self) -> crate::PrekeyWindows {
+        // A keyring from before D16 is bounded to the window its epoch falls in,
+        // rather than left unbounded: an old file must not keep the old exposure
+        // simply because it predates the rule.
+        let window_end = self.prekey_window_end.unwrap_or_else(|| {
+            crate::prekey::window_start(crate::prekey::window_of(self.prekey_epoch))
+                .saturating_add(crate::prekey::EPOCHS_PER_WINDOW)
+        });
+        let current =
+            crate::PrekeySeed::from_parts(self.prekey_seed, self.prekey_epoch, window_end);
+        let previous = match (
+            self.previous_prekey_seed,
+            self.previous_prekey_epoch,
+            self.previous_prekey_window_end,
+        ) {
+            (Some(seed), Some(epoch), Some(end)) => {
+                Some(crate::PrekeySeed::from_parts(seed, epoch, end))
+            }
+            // Anything less than all three is no outgoing window. A partially
+            // written one would be a seed that cannot say what it covers.
+            _ => None,
+        };
+        crate::PrekeyWindows::from_parts(current, previous)
     }
 
     /// Replace the prekey seed, after ratcheting it forward.
     ///
     /// The caller re-seals the keystore; until it does, the destroyed epochs are
     /// only destroyed in memory.
-    pub fn set_prekeys(&mut self, prekeys: &crate::PrekeySeed) {
-        self.prekey_seed = *prekeys.seed();
-        self.prekey_epoch = prekeys.epoch();
+    pub fn set_prekeys(&mut self, prekeys: &crate::PrekeyWindows) {
+        self.prekey_seed = *prekeys.current().seed();
+        self.prekey_epoch = prekeys.current().epoch();
+        self.prekey_window_end = Some(prekeys.current().window_end());
+        self.previous_prekey_seed = prekeys.previous().map(|p| *p.seed());
+        self.previous_prekey_epoch = prekeys.previous().map(crate::PrekeySeed::epoch);
+        self.previous_prekey_window_end = prekeys.previous().map(crate::PrekeySeed::window_end);
     }
 
     /// Seal under a passphrase, at production cost.
@@ -350,6 +405,9 @@ impl Drop for Keyring {
         self.device_seed.zeroize();
         self.agreement_secret.zeroize();
         self.prekey_seed.zeroize();
+        if let Some(seed) = self.previous_prekey_seed.as_mut() {
+            seed.zeroize();
+        }
     }
 }
 
@@ -386,7 +444,7 @@ mod tests {
             &SigningKeypair::generate().unwrap(),
             &SigningKeypair::generate().unwrap(),
             &AgreementKeypair::generate().unwrap(),
-            &crate::PrekeySeed::generate(100).unwrap(),
+            &crate::PrekeyWindows::new(crate::PrekeySeed::generate(100).unwrap()),
         )
     }
 
@@ -529,11 +587,61 @@ mod tests {
     #[test]
     fn the_prekey_seed_survives_a_round_trip() {
         let original = keyring();
-        let public = original.prekeys().public(105).unwrap();
+        // 103, not 105: epoch 100's window ends at 104 (D16).
+        let public = original.prekeys().public(103).unwrap();
         let sealed = original.seal_with_test(b"p").unwrap();
         let opened = Keyring::open(&sealed, b"p").unwrap();
-        assert_eq!(opened.prekeys().public(105).unwrap(), public);
-        assert_eq!(opened.prekeys().epoch(), 100);
+        assert_eq!(opened.prekeys().public(103).unwrap(), public);
+        assert_eq!(opened.prekeys().current().epoch(), 100);
+        // And the window bound survives the round trip, or it would be lost the
+        // first time the keystore was rewritten.
+        assert_eq!(
+            opened.prekeys().current().window_end(),
+            original.prekeys().current().window_end()
+        );
+    }
+
+    #[test]
+    fn both_windows_survive_a_round_trip() {
+        // Three new CBOR fields carry the outgoing window. If any of them is lost
+        // in a round trip, rotating destroys live mail -- which is the whole
+        // failure the two-window design exists to prevent.
+        let mut windows = crate::PrekeyWindows::new(crate::PrekeySeed::generate(100).unwrap());
+        let old_public = windows.public(103).unwrap();
+
+        let cold = crate::ColdSeed::generate().unwrap();
+        windows
+            .install(cold.open_window(crate::window_of(104)))
+            .unwrap();
+        let new_public = windows.public(104).unwrap();
+
+        let mut ring = keyring();
+        ring.set_prekeys(&windows);
+        let sealed = ring.seal_with_test(b"p").unwrap();
+        let opened = Keyring::open(&sealed, b"p").unwrap();
+        let restored = opened.prekeys();
+
+        assert_eq!(
+            restored.public(104).unwrap(),
+            new_public,
+            "current window lost"
+        );
+        assert_eq!(
+            restored.public(103).unwrap(),
+            old_public,
+            "outgoing window lost"
+        );
+        assert!(restored.previous().is_some());
+    }
+
+    #[test]
+    fn a_keyring_with_no_outgoing_window_round_trips_too() {
+        let windows = crate::PrekeyWindows::new(crate::PrekeySeed::generate(100).unwrap());
+        let mut ring = keyring();
+        ring.set_prekeys(&windows);
+        let sealed = ring.seal_with_test(b"p").unwrap();
+        let opened = Keyring::open(&sealed, b"p").unwrap();
+        assert!(opened.prekeys().previous().is_none());
     }
 
     #[test]

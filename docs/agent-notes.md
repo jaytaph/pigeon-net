@@ -184,3 +184,40 @@ it changes about how you work.
   cannot be recreated because recovery is not built (D11, M8). Reading the old
   version is a few lines; check for existing files before assuming a clean break.
 - **Status:** open.
+
+## Rotating a key window must not destroy the window it replaces
+- **Found:** 2026-09-19 — implementing D16. The first version held one warm seed
+  and replaced it when the next window opened. It passed every test I had written,
+  because none of them rotated *early*.
+- **Claim:** an operator rotates before the current window runs out — waiting until
+  it is spent would leave senders on `fs: none`. Replacing the seed at that moment
+  destroys the secrets for epochs that are still inside their retention period and
+  whose public halves are already published. Mail sealed to them becomes
+  undecryptable and nothing says so.
+- **Check:** publish, open the next window, then ask for a secret from the first:
+  `epoch 2959 was destroyed; earliest derivable is 2964`.
+- **So:** hold both. Two windows, and provably never three — an epoch is needed
+  until its end plus `W` (30 days), and a window is a quarter, so window `w` is
+  live for 30 days into `w+1` and never reaches `w+2`. Do that arithmetic before
+  choosing how much to keep; it turns "how many?" from taste into a fact.
+- **And:** the flaw was invisible to tests that only ever rotated at the boundary.
+  When a change is about *when* an operator does something, test the moment they
+  would actually pick, not the moment the code makes easiest.
+- **Status:** open.
+
+## Changing a unit renumbers everything already stored in it
+- **Found:** 2026-09-19 — D16 moved epochs from daily to weekly, which is a
+  one-line constant. The live node then reported window `20594..20605` against
+  current epoch `2959`, and could not publish at all.
+- **Claim:** an epoch number is meaningless without the epoch length, so changing
+  the length silently reinterprets every stored number. The keystore held a daily
+  epoch; the clock now produced weekly ones. The window was unreachable in both
+  directions, and `status` printed "about 123522 days remaining" rather than
+  admitting it.
+- **Check:** `nodectl prekeys status` against a keystore written before the change.
+- **So:** a stored value in changed units needs a migration, not a reinterpretation.
+  `prekeys reanchor` discards the meaningless window and anchors a new one; it is
+  the only operation permitted to move backwards, and it says why in its own docs.
+  Also: when a computed figure can be nonsense, check the precondition and say so
+  instead of printing the figure.
+- **Status:** open.

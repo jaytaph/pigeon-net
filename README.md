@@ -90,7 +90,8 @@ Sealed to the recipient's **epoch prekeys**, fanned out per device, and carried 
 relays that cannot read them (§8):
 
 ```bash
-nodectl prekeys                         # publish this device's epoch keys
+nodectl prekeys publish                 # publish this device's epoch keys
+nodectl prekeys status                  # which derivation window is live (D16)
 nodectl message id:b3:... "Not for the area."
 nodectl inbox                           # what has arrived here
 nodectl expire                          # destroy epoch secrets past their window
@@ -104,6 +105,19 @@ needed.
 An epoch key expires. A message sealed to one that has been destroyed reports
 `Expired` rather than a decryption error, so the mechanism is distinguishable
 from a bug.
+
+How far ahead prekeys can be published is bounded by a **derivation window**
+(D16). The warm seed on the node covers one quarter and cannot reach past it;
+crossing into the next window needs a cold half kept off the machine:
+
+```bash
+nodectl prekeys open-window   < your-cold-seed-file
+```
+
+That is what stops a copy of the keystore decrypting everything anyone sends you
+from now on — it opens the remainder of one window instead. Miss the rotation and
+senders fall back to the static identity key (`fs: none`), which degrades rather
+than breaks.
 
 ## Who is who
 

@@ -27,6 +27,6 @@ pub use identity::{IdentityError, IdentityState};
 pub use keys::{AgreementKeypair, SigningKeypair, verify};
 pub use keystore::{KdfParams, Keyring};
 pub use message::{SUITE_V1, Target, open_message, seal_message};
-pub use prekey::PrekeySeed;
+pub use prekey::{ColdSeed, EPOCHS_PER_WINDOW, PrekeySeed, PrekeyWindows, window_of, window_start};
 pub use sign::{sign_object, verify_object};
 pub use snapshot::{ResolvedIdentity, Snapshot, SnapshotError};

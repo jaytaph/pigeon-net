@@ -128,6 +128,108 @@ impl Node {
         now.div_euclid(EPOCH_MILLIS).cast_unsigned()
     }
 
+    /// The public half this node would publish for `epoch`.
+    ///
+    /// Fails if the epoch has been ratcheted away or lies outside the current
+    /// window — which is the same question as "could we still open a message
+    /// sealed to it?", and is worth being able to ask directly.
+    pub fn prekey_public(
+        &self,
+        passphrase: &[u8],
+        epoch: u64,
+    ) -> Result<pigeonnet_core::AgreementKeyBytes, NodeError> {
+        Ok(self.keyring(passphrase)?.prekeys().public(epoch)?)
+    }
+
+    /// The derivation window this node currently holds (D16).
+    ///
+    /// Returns the first epoch it can still derive and the first it cannot.
+    pub fn prekey_window(&self, passphrase: &[u8]) -> Result<(u64, u64), NodeError> {
+        let windows = self.keyring(passphrase)?.prekeys();
+        let current = windows.current();
+        Ok((current.epoch(), current.window_end()))
+    }
+
+    /// The outgoing window, if one is still being held for retention (D16).
+    pub fn previous_prekey_window(
+        &self,
+        passphrase: &[u8],
+    ) -> Result<Option<(u64, u64)>, NodeError> {
+        Ok(self
+            .keyring(passphrase)?
+            .prekeys()
+            .previous()
+            .map(|p| (p.epoch(), p.window_end())))
+    }
+
+    /// Whether the held windows cover `epoch` at all.
+    ///
+    /// False means this node cannot publish and cannot open anything sealed now.
+    /// Two ways to get there: the window is spent, or the keystore predates a
+    /// change to epoch numbering and its window is in the old units.
+    pub fn prekey_window_covers(&self, passphrase: &[u8], epoch: u64) -> Result<bool, NodeError> {
+        Ok(self.keyring(passphrase)?.prekeys().public(epoch).is_ok())
+    }
+
+    /// Replace the held windows with a single fresh one, from a new cold half.
+    ///
+    /// **A migration, not a rotation.** [`open_prekey_window`](Self::open_prekey_window)
+    /// refuses to move backwards, because doing so resurrects destroyed epochs.
+    /// This does move backwards, and is for the one case where that is correct: a
+    /// keystore whose window is in units that no longer mean anything, because it
+    /// predates D16's move from daily to weekly epochs. Such a window cannot be
+    /// ratcheted to or from — nothing it holds corresponds to a reachable epoch —
+    /// so nothing is lost by discarding it.
+    ///
+    /// Any prekey published under the old numbering becomes unopenable. That has
+    /// already happened by the time this is reachable: the numbers changed, so no
+    /// sender could select one of those keys anyway.
+    pub fn reanchor_prekeys(
+        &self,
+        cold: &pigeonnet_crypto::ColdSeed,
+        epoch: u64,
+        passphrase: &[u8],
+    ) -> Result<(u64, u64), NodeError> {
+        let mut keyring = self.keyring(passphrase)?;
+        let opened = cold.open_window(pigeonnet_crypto::window_of(epoch));
+        let bounds = (opened.epoch(), opened.window_end());
+        keyring.set_prekeys(&pigeonnet_crypto::PrekeyWindows::new(opened));
+        let sealed = keyring.seal_with(passphrase, self.kdf)?;
+        crate::write_private(&self.keystore_path(), &sealed)?;
+        Ok(bounds)
+    }
+
+    /// Install the warm seed for the window containing `epoch`, from the cold half.
+    ///
+    /// This is the quarterly act D16 asks for. It is deliberate, it needs material
+    /// that is not on this machine, and it is the only way past a window boundary.
+    ///
+    /// Deterministic, so running it twice for the same window is harmless — the
+    /// same warm seed comes back, and prekeys already published from it stay
+    /// valid. Running it for a window *behind* the current one is refused: that
+    /// would walk the ratchet backwards and resurrect destroyed epochs.
+    pub fn open_prekey_window(
+        &self,
+        cold: &pigeonnet_crypto::ColdSeed,
+        epoch: u64,
+        passphrase: &[u8],
+    ) -> Result<(u64, u64), NodeError> {
+        let mut keyring = self.keyring(passphrase)?;
+        let mut windows = keyring.prekeys();
+        let window = pigeonnet_crypto::window_of(epoch);
+        let opened = cold.open_window(window);
+        let bounds = (opened.epoch(), opened.window_end());
+
+        // Installed alongside the outgoing window rather than over it: the epochs
+        // still inside their retention period must stay openable, or rotating at
+        // the sensible moment would silently destroy live mail.
+        windows.install(opened)?;
+        keyring.set_prekeys(&windows);
+        let sealed = keyring.seal_with(passphrase, self.kdf)?;
+        crate::write_private(&self.keystore_path(), &sealed)?;
+        Ok(bounds)
+    }
+
     /// Publish epoch prekeys for this device, covering `lookahead` epochs.
     ///
     /// Requires `publish-prekeys`, which is what keeps the root key cold: a key
@@ -157,8 +259,19 @@ impl Node {
 
         let seed = self.keyring(passphrase)?.prekeys();
         let first = Self::epoch_at(now);
+
+        // Lookahead is capped by the derivation window, not by the caller (D16).
+        // Publishing past it would mint public keys whose private halves this node
+        // cannot derive -- senders would seal to them and nobody could open the
+        // result, which is worse than having no prekey at all.
+        let window_end = seed.current().window_end();
+        if first >= window_end {
+            return Err(NodeError::PrekeyWindowExhausted { window_end });
+        }
+        let last = first.saturating_add(lookahead.max(1)).min(window_end);
+
         let mut published = Vec::new();
-        for epoch in first..first.saturating_add(lookahead.max(1)) {
+        for epoch in first..last {
             if existing.contains(&epoch) {
                 continue;
             }

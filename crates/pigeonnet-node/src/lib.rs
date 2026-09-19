@@ -23,6 +23,10 @@ pub use inbox::DeviceCredential;
 pub use message::{MessageBody, ReceivedMessage};
 pub use naming::Naming;
 pub use replication::Replication;
+pub use snapshot::{EPOCH_MILLIS, RETENTION_MILLIS};
+// Re-exported so the CLI need not depend on `pigeonnet-crypto` directly: the
+// tooling talks to a node, and the node owns the keystore.
+pub use pigeonnet_crypto::{ColdSeed, EPOCHS_PER_WINDOW};
 
 use std::{
     fs,
@@ -71,6 +75,15 @@ pub enum NodeError {
     Snapshot(pigeonnet_crypto::SnapshotError),
     /// A bundle could not be read or written.
     Bundle(BundleError),
+    /// Prekeys cannot be published: the derivation window is exhausted (D16).
+    ///
+    /// Reported rather than published-as-nothing. A node that silently stops
+    /// publishing leaves its correspondents falling back to `fs: none` with no
+    /// explanation, which is the failure D16 accepts but does not want hidden.
+    PrekeyWindowExhausted {
+        /// The first epoch this node can no longer derive.
+        window_end: u64,
+    },
 }
 
 macro_rules! from_error {
@@ -109,6 +122,11 @@ impl core::fmt::Display for NodeError {
             Self::UnknownIdentity(id) => {
                 write!(f, "nothing known about {id} -- resolve or sync first")
             }
+            Self::PrekeyWindowExhausted { window_end } => write!(
+                f,
+                "the prekey derivation window ended at epoch {window_end} -- \
+                 open the next one with the cold prekey seed"
+            ),
             Self::UnknownObject(id) => {
                 write!(f, "this node does not hold {id} -- sync first")
             }
@@ -133,6 +151,13 @@ pub struct CreatedIdentity {
     pub device_grant: ObjectId,
     /// The recovery secret. Display once, then drop.
     pub recovery_secret: Zeroizing<[u8; 32]>,
+    /// The cold half of the prekey seed (D16). Display once, then drop.
+    ///
+    /// Like the recovery secret, this is deliberately not written to the
+    /// keystore: a cold half stored beside the warm seed it bounds would bound
+    /// nothing. Unlike the recovery secret it is needed **routinely** — once a
+    /// quarter — so it wants somewhere reachable but off this machine.
+    pub cold_prekey_seed: Zeroizing<[u8; 32]>,
 }
 
 impl core::fmt::Debug for CreatedIdentity {
@@ -304,7 +329,12 @@ impl Node {
         // Anchored at the current epoch: everything before it is unreachable
         // from this seed by construction, so an identity created today cannot
         // produce a prekey for last week even if asked.
-        let prekeys = pigeonnet_crypto::PrekeySeed::generate(Self::epoch_at(now))?;
+        // The warm seed comes from the cold half rather than from entropy, so that
+        // this identity can open its next window when this one runs out (D16).
+        let cold = pigeonnet_crypto::ColdSeed::generate()?;
+        let prekeys = pigeonnet_crypto::PrekeyWindows::new(
+            cold.open_window(pigeonnet_crypto::window_of(Self::epoch_at(now))),
+        );
         let keyring = Keyring::new(&root_key, &device_key, &agreement_key, &prekeys);
         let sealed = keyring.seal_with(passphrase, self.kdf)?;
         write_private(&self.keystore_path(), &sealed)?;
@@ -329,6 +359,7 @@ impl Node {
             genesis: genesis.id(),
             device_grant: grant.id(),
             recovery_secret: recovery_key.seed(),
+            cold_prekey_seed: cold.as_bytes(),
         })
     }
 

@@ -40,6 +40,17 @@ pub enum CryptoError {
         earliest: u64,
     },
 
+    /// The epoch lies at or beyond the end of the current derivation window.
+    ///
+    /// Not a failure: it is the bound D16 exists to impose. Crossing it needs the
+    /// cold half, which is deliberately not on this machine.
+    EpochBeyondWindow {
+        /// The epoch asked for.
+        epoch: u64,
+        /// The first epoch this warm seed cannot reach.
+        window_end: u64,
+    },
+
     /// An epoch is too far ahead to derive in one go.
     EpochTooFar {
         /// What was asked for.
@@ -82,6 +93,13 @@ impl fmt::Display for CryptoError {
                 write!(
                     f,
                     "epoch {epoch} was destroyed; earliest derivable is {earliest}"
+                )
+            }
+            Self::EpochBeyondWindow { epoch, window_end } => {
+                write!(
+                    f,
+                    "epoch {epoch} is beyond this derivation window, which ends at {window_end}; \
+                     open the next window with the cold prekey seed"
                 )
             }
             Self::EpochTooFar { epoch, limit } => {

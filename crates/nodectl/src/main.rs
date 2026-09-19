@@ -131,12 +131,9 @@ enum Command {
         identity: String,
     },
 
-    /// Publish epoch prekeys for this device (§8.1).
-    Prekeys {
-        /// How many epochs ahead to cover.
-        #[arg(long, default_value_t = 14)]
-        lookahead: u64,
-    },
+    /// Epoch prekeys for this device (§8.1, D16).
+    #[command(subcommand)]
+    Prekeys(PrekeyCommand),
 
     /// Reply to a post, inheriting its area and thread.
     Reply {
@@ -200,6 +197,35 @@ enum PeerCommand {
     },
     /// Show configured peers.
     List,
+}
+
+#[derive(Subcommand, Debug)]
+enum PrekeyCommand {
+    /// Publish prekeys for the epochs this node can still derive.
+    Publish {
+        /// How many epochs ahead to cover. Capped by the derivation window (D16).
+        #[arg(long, default_value_t = 14)]
+        lookahead: u64,
+    },
+    /// Show the current derivation window and when it runs out.
+    Status,
+    /// Open the next derivation window, using the cold prekey seed (D16).
+    ///
+    /// The seed is read from standard input, never from an argument: anything in
+    /// argv is readable by every process on the machine.
+    OpenWindow {
+        /// Open the window containing this epoch. Defaults to the one after the
+        /// current window, which is what a quarterly rotation wants.
+        #[arg(long)]
+        epoch: Option<u64>,
+    },
+    /// Give an identity created before D16 a cold seed and a usable window.
+    ///
+    /// For a keystore whose window predates the move from daily to weekly epochs
+    /// and so covers nothing reachable. Generates a cold half, shows it once, and
+    /// anchors a window at the current epoch. Prekeys published under the old
+    /// numbering are already unusable and stay that way.
+    Reanchor,
 }
 
 #[derive(Subcommand, Debug)]
@@ -386,18 +412,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Resolve { identity } => show_resolved(&node, &identity),
-        Command::Prekeys { lookahead } => {
-            let published = node.publish_prekeys(&passphrase()?, now_millis()?, lookahead)?;
-            match published.len() {
-                0 => out!("already covered; nothing to publish"),
-                n => out!(
-                    "published {n} epoch prekeys, epochs {}..={}",
-                    published.first().copied().unwrap_or(0),
-                    published.last().copied().unwrap_or(0)
-                ),
-            }
-            Ok(())
-        }
+        Command::Prekeys(command) => run_prekeys(&node, command),
         Command::Reply {
             parent,
             content,
@@ -477,6 +492,19 @@ fn create_identity(node: &Node, name: Option<&str>, when: i64) -> Result<()> {
     out!("     Not stored on this machine. Will not be shown again.");
     out!("     Without it, a lost or stolen root key ends this identity.");
     out!();
+    out!("  \u{26a0}  COLD PREKEY SEED — write this down too (D16).");
+    out!();
+    out!(
+        "      {}",
+        render::recovery_phrase(&created.cold_prekey_seed)
+    );
+    out!();
+    out!("     Also not stored here. Unlike the recovery key you will need this");
+    out!("     roughly every quarter, to open the next derivation window:");
+    out!("         nodectl prekeys open-window   < your-cold-seed-file");
+    out!("     It is what stops a copy of this node's keystore decrypting");
+    out!("     everything anyone sends you from now on.");
+    out!();
     if when < now_millis()? - 60_000 {
         out!(
             "  dated        {}  (claimed, not proven)",
@@ -486,6 +514,135 @@ fn create_identity(node: &Node, name: Option<&str>, when: i64) -> Result<()> {
     out!("  genesis      {}", created.genesis);
     out!("  device grant {}", created.device_grant);
     Ok(())
+}
+
+fn run_prekeys(node: &Node, command: PrekeyCommand) -> Result<()> {
+    let passphrase = passphrase()?;
+    match command {
+        PrekeyCommand::Publish { lookahead } => {
+            let published = node.publish_prekeys(&passphrase, now_millis()?, lookahead)?;
+            match published.len() {
+                0 => out!("already covered; nothing to publish"),
+                n => out!(
+                    "published {n} epoch prekeys, epochs {}..={}",
+                    published.first().copied().unwrap_or(0),
+                    published.last().copied().unwrap_or(0)
+                ),
+            }
+            let (_, end) = node.prekey_window(&passphrase)?;
+            let now_epoch = Node::epoch_at(now_millis()?);
+            out!(
+                "window ends at epoch {end}, {} epochs from now",
+                end.saturating_sub(now_epoch)
+            );
+            Ok(())
+        }
+        PrekeyCommand::Status => {
+            let (first, end) = node.prekey_window(&passphrase)?;
+            let now_epoch = Node::epoch_at(now_millis()?);
+            out!("epoch now     {now_epoch}");
+            out!(
+                "window        {first}..{end}  ({} epochs)",
+                pigeonnet_node::EPOCHS_PER_WINDOW
+            );
+            match node.previous_prekey_window(&passphrase)? {
+                Some((p_first, p_end)) => {
+                    out!("retained      {p_first}..{p_end}  (outgoing, still within retention)")
+                }
+                None => out!("retained      none"),
+            }
+            // A window that does not contain the current epoch cannot be
+            // described in terms of "remaining", and saying so plainly beats
+            // printing a number that happens to be enormous.
+            if !node.prekey_window_covers(&passphrase, now_epoch)? {
+                out!();
+                out!("This window does not cover the current epoch, so this node");
+                out!("cannot publish prekeys or open anything sealed to it now.");
+                if now_epoch < first {
+                    out!();
+                    out!("The stored window is far ahead of the clock, which is what a");
+                    out!("keystore written before epochs became weekly looks like (D16).");
+                    out!("  nodectl prekeys reanchor");
+                } else {
+                    out!("  nodectl prekeys open-window   < cold-seed-file");
+                }
+                return Ok(());
+            }
+
+            let left = end.saturating_sub(now_epoch);
+            out!(
+                "remaining     {left} epoch(s), about {} day(s)",
+                left.saturating_mul(7)
+            );
+            out!();
+            if left == 0 {
+                out!("This window is spent. Until the next one is opened, senders");
+                out!("fall back to the static identity key (fs: none, \u{a7}8.1).");
+                out!("  nodectl prekeys open-window   < cold-seed-file");
+            } else {
+                out!("Opening the next window needs the cold prekey seed, which is");
+                out!("not on this machine. That is the point (D16).");
+            }
+            Ok(())
+        }
+        PrekeyCommand::OpenWindow { epoch } => {
+            let (_, current_end) = node.prekey_window(&passphrase)?;
+            let target = epoch.unwrap_or(current_end);
+
+            let cold = read_cold_seed()?;
+            let (first, end) = node.open_prekey_window(&cold, target, &passphrase)?;
+            out!("opened window {first}..{end}");
+            out!("Publish into it with: nodectl prekeys publish");
+            Ok(())
+        }
+        PrekeyCommand::Reanchor => {
+            let now = now_millis()?;
+            let now_epoch = Node::epoch_at(now);
+            if node.prekey_window_covers(&passphrase, now_epoch)? {
+                bail!(
+                    "this node's window already covers epoch {now_epoch}; \
+                     use `prekeys open-window` to rotate, which keeps the outgoing window"
+                );
+            }
+
+            let cold = pigeonnet_node::ColdSeed::generate()?;
+            let (first, end) = node.reanchor_prekeys(&cold, now_epoch, &passphrase)?;
+
+            out!("  \u{26a0}  NEW COLD PREKEY SEED — write this down, on paper, now.");
+            out!();
+            out!("      {}", render::recovery_phrase(&cold.as_bytes()));
+            out!();
+            out!("     Not stored on this machine. Will not be shown again.");
+            out!("     You will need it about every quarter, to open the next window.");
+            out!();
+            out!("anchored window {first}..{end}");
+            out!("Publish into it with: nodectl prekeys publish");
+            Ok(())
+        }
+    }
+}
+
+/// Read the cold prekey seed from standard input.
+///
+/// Not an argument: argv is world-readable. Accepts the base32 form shown at
+/// genesis, with or without the spaces it is grouped into for transcription.
+fn read_cold_seed() -> Result<pigeonnet_node::ColdSeed> {
+    use std::io::Read as _;
+    let mut text = String::new();
+    std::io::stdin()
+        .read_to_string(&mut text)
+        .context("reading the cold prekey seed from stdin")?;
+    let cleaned: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    if cleaned.is_empty() {
+        bail!("no cold prekey seed on stdin");
+    }
+    let bytes = pigeonnet_core::base32::decode(&cleaned)
+        .context("that is not a base32 cold prekey seed")?;
+    let seed: [u8; 32] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("a cold prekey seed is 32 bytes, got {}", bytes.len()))?;
+    Ok(pigeonnet_node::ColdSeed::from_bytes(seed))
 }
 
 fn show_identity(node: &Node) -> Result<()> {

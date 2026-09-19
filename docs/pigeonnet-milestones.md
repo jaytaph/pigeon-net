@@ -397,9 +397,14 @@ why it was sized XL and flagged for splitting.
   quantity: publishing is not what creates exposure, derivability is, and the
   first implementation let a leaked keystore derive roughly eleven years forward.
   D16 splits the seed cold and warm so a window bounds it, binds each prekey to
-  its epoch, and moves epochs from daily to weekly. **Not yet implemented** —
-  `PrekeySeed` still has no window, and `MAX_DERIVATION_SPAN` is still doing
-  security policy by accident.
+  its epoch, and moves epochs from daily to weekly. **Implemented 2026-09-19.**
+  `PrekeySeed` is bounded to a window, `ColdSeed` opens the next one, and the node
+  holds exactly two windows at once — provably enough, since retention is thirty
+  days and a window is a quarter. Building it found a flaw in the first attempt:
+  replacing the window on rotation destroyed the secrets for epochs still inside
+  their retention period, so an operator rotating at the sensible moment lost live
+  mail silently. `nodectl prekeys status` / `open-window` / `reanchor` are the
+  operator surface; `MAX_DERIVATION_SPAN` is now only a backstop.
 - Inbox spooling at a carrier, and the authenticated `inbox:` query (D15).
 - Sender **fan-out**: payload encrypted once under a content key, wrapped per
   recipient device.

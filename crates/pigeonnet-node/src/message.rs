@@ -186,7 +186,7 @@ impl Node {
         message: &DirectMessage,
         sender: IdentityId,
         device: PublicKeyBytes,
-        prekeys: &pigeonnet_crypto::PrekeySeed,
+        prekeys: &pigeonnet_crypto::PrekeyWindows,
         identity_key: &pigeonnet_crypto::AgreementKeypair,
     ) -> MessageBody {
         let entry = message
